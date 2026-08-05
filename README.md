@@ -22,6 +22,11 @@ SuperDictate is a Linux-native, Wayland-compatible smart dictation tool. It uses
 - **Vault mode (`--mode vault`):** Save transcription as an Obsidian note instead of pasting. Gemini generates the note title automatically.
 - **Append (`--append`):** Add new text to the existing clipboard content instead of replacing it.
 - **Auto-stop by silence:** Set `silence_timeout` in config and the recording stops automatically — no second keypress needed.
+- **Auto-stop by VAD (smoothed):** Set `auto_stop: "vad"` — voice-activity detection with onset/hangover/prefill (`vad.py`), so it doesn't cut on brief silences or start on noise. Uses energy fallback, or silero-vad if installed (`vad_use_silero: true`).
+- **Blank transcription filter:** silently discards empty/noise transcriptions instead of pasting garbage.
+- **Editable post-process prompts:** `--prompts` lists them; edit `post_process` in config (multi-prompt, selectable via `selected_prompt`).
+- **Configurable LLM provider:** `llm_provider.provider: "openai"` for OpenAI-compatible endpoints (with optional `lang_detect`), or Gemini by default.
+- **Recording overlay:** `overlay: "tray" | "overlay"` state indicator while recording (`overlay.py`).
 - **Push-to-talk (`ptt.py`):** Hold a key to record, release to transcribe. Runs as a background daemon.
 - **History (`--history [N]`):** Browse the last N transcriptions from the terminal.
 - **Custom Vocabulary:** Define your own terms (names, acronyms, brands) in the config file.

@@ -34,6 +34,12 @@ DEFAULT_CONFIG = {
     "language": "es",
     "default_mode": "default",
     "silence_timeout": None,
+    "auto_stop": "silence",            # "silence" (sox, default) | "vad" (VAD suavizado)
+    "vad_max_silence_ms": 1500,
+    "vad_onset_ms": 120,
+    "vad_hangover_ms": 500,
+    "vad_prefill_ms": 240,
+    "vad_use_silero": False,           # True si silero-vad está instalado
     "ptt_key": "KEY_F9",
     "sherlock_to": "",
     "vocabulary": [],
@@ -66,7 +72,36 @@ DEFAULT_CONFIG = {
             "name": "Vault",
             "prompt": ""
         }
-    }
+    },
+    "post_process": {
+        "enabled": False,
+        "prompts": [
+            {
+                "id": "cleanup",
+                "name": "Limpieza (default)",
+                "prompt": "Corrige errores fonéticos de transcripción y respeta los nombres propios y el vocabulario del usuario. Devuelve solo el texto corregido."
+            },
+            {
+                "id": "formal",
+                "name": "Formal",
+                "prompt": "Reescribe con lenguaje formal y profesional, oraciones completas y bien estructuradas."
+            },
+            {
+                "id": "bullets",
+                "name": "Bullets",
+                "prompt": "Reformatea el texto como lista de bullets."
+            }
+        ],
+        "selected_prompt": "cleanup"
+    },
+    "llm_provider": {
+        "provider": "gemini",
+        "openai_base_url": "https://api.openai.com/v1",
+        "openai_api_key": "",
+        "openai_model": "gpt-4o-mini",
+        "lang_detect": False
+    },
+    "overlay": "tray"
 }
 
 
@@ -124,6 +159,22 @@ def show_history(n=10):
             print(f"[{ts}] [{mode}] {text}")
 
 
+def show_post_process_prompts():
+    """Lista los prompts de post-proceso editables (función 3, estilo Handy)."""
+    cfg = load_config()
+    pp = cfg.get("post_process") or {}
+    prompts = pp.get("prompts", [])
+    sel = pp.get("selected_prompt")
+    if not prompts:
+        print("Sin prompts de post-proceso configurados.")
+        return
+    print(f"Habilitado: {pp.get('enabled', False)} | Seleccionado: {sel}")
+    for p in prompts:
+        mark = "-> " if p.get("id") == sel else "   "
+        print(f"{mark}[{p.get('id')}] {p.get('name')}: {p.get('prompt','')[:70]}")
+    print("\nEditá ~/.config/superdictate/config.json -> post_process para cambiarlos.")
+
+
 def notify(msg, icon="audio-input-microphone", expire=2000):
     subprocess.run(["notify-send", "-t", str(expire), "-i", icon, "SuperDictate", msg])
 
@@ -135,7 +186,7 @@ def simulate_paste():
         return
     try:
         ui = UInput()
-        time.sleep(0.5)
+        time.sleep(1.2)
 
         ui.write(e.EV_KEY, e.KEY_LEFTCTRL, 1);  ui.syn(); time.sleep(0.05)
         ui.write(e.EV_KEY, e.KEY_LEFTSHIFT, 1); ui.syn(); time.sleep(0.05)
@@ -196,6 +247,100 @@ def _copy_to_clipboard(text):
     return proc.returncode == 0
 
 
+def is_blank_transcription(text):
+    """True si la transcripción es vacía o solo ruido (Handy: is_blank_transcription).
+
+    Evita pegar/guardar basura cuando Whisper devolvió silencio o signos de
+    puntuación sueltos.
+    """
+    if not text:
+        return True
+    stripped = text.strip()
+    if not stripped:
+        return True
+    # Solo puntuación / caracteres no verbales -> tratar como vacío
+    return all(ch in ".,;:!?¿¡-—()[]{}…\"'`~*#@&%" for ch in stripped)
+
+
+def _post_process_llm(system_prompt, user_content, config):
+    """Envía post-proceso/refinado al proveedor configurado (default Gemini).
+
+    Configuración opcional en config.json:
+      "llm_provider": {
+         "provider": "gemini" | "openai",
+         "openai_base_url": "https://api.openai.com/v1",   # o compatible
+         "openai_api_key": "...",
+         "openai_model": "gpt-4o-mini",
+         "lang_detect": true                              # auto-detect de idioma
+      }
+    Devuelve el texto final o None en caso de fallo/abstención.
+    """
+    provider = (config.get("llm_provider") or {}).get("provider", "gemini")
+    if provider == "openai":
+        return _openai_post_process(system_prompt, user_content, config)
+    # Default: Gemini via ecosistema
+    try:
+        from shared_config import call_gemini
+        return call_gemini(
+            f"{system_prompt}\n\n{user_content}",
+            temperature=0.3, timeout=45,
+        )
+    except Exception:
+        return None
+
+
+def _openai_post_process(system_prompt, user_content, config):
+    """Post-proceso vía API OpenAI-compatible (cliente HTTP puro, sin SDK)."""
+    import urllib.request
+    import urllib.error
+
+    lp = config.get("llm_provider") or {}
+    base = lp.get("openai_base_url", "https://api.openai.com/v1")
+    api_key = lp.get("openai_api_key", "")
+    model = lp.get("openai_model", "gpt-4o-mini")
+    if not api_key:
+        return None
+
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 2000,
+    }
+    req = urllib.request.Request(
+        f"{base.rstrip('/')}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        return data["choices"][0]["message"]["content"].strip()
+    except (urllib.error.URLError, KeyError, IndexError, json.JSONDecodeError):
+        return None
+
+
+def auto_detect_language(text):
+    """Heurística liviana de detección de idioma (es/en/pt). Marca estimación.
+
+    Si el proveedor usa detección nativa, se prefiere esa; esto es un fallback
+    para el adjetivo del resultado.
+    """
+    accented = sum(1 for ch in text if ch in "áéíóúñüÁÉÍÓÚÑÜ¿¡")
+    if accented >= 2:
+        return "es"
+    # Portugués: muy frecuente ã/õ/ç
+    pt = sum(1 for ch in text if ch in "ãõçãÃÕÇ")
+    if pt >= 2:
+        return "pt"
+    return "es"  # default conservador
+
+
+
 def stop_and_transcribe():
     pid = None
     try:
@@ -216,7 +361,7 @@ def stop_and_transcribe():
         except ProcessLookupError:
             pass
 
-    os.system("pkill -f 'indicator.py'")
+    os.system("pkill -f 'indicator.py'; pkill -f 'overlay.py'")
     time.sleep(0.2)
 
     # Leer estado persistido al iniciar grabación
@@ -265,6 +410,11 @@ def stop_and_transcribe():
         raw_text = res.get("text", "")
         if not raw_text or "error" in res:
             notify(f"Error o silencio: {res.get('error', 'Audio vacio')}", "dialog-error", 3000)
+            return
+
+        # Filtro de transcripción en blanco (Handy): descartar ruido/puntuación suelta
+        if is_blank_transcription(raw_text):
+            notify("No se detectó voz (audio en blanco)", "dialog-warning", 2500)
             return
 
         log_history(raw_text=raw_text, refined_text="", is_cmd=False, mode=mode_key)
@@ -413,6 +563,43 @@ def stop_and_transcribe():
         else:
             final_text = res_json.get("refined_text", raw_text)
 
+            # Proveedor LLM configurable (función 5): si se configuró un proveedor
+            # openai, refinar el texto aquí en vez de usar solo refined_text de Gemini.
+            provider_cfg = config.get("llm_provider") or {}
+            if provider_cfg.get("provider") and provider_cfg.get("provider") != "gemini":
+                sys_prompt = (
+                    "Eres el corrector de SuperDictate. Corrige errores fonéticos de "
+                    "transcripción, respeta nombres propios y vocabulario del usuario."
+                )
+                vocab_hint = f" Vocabulario: {', '.join(config.get('vocabulary', []))}." \
+                    if config.get("vocabulary") else ""
+                lang_hint = ""
+                if provider_cfg.get("lang_detect"):
+                    lang = auto_detect_language(raw_text)
+                    lang_hint = f" Idioma detectado: {lang}."
+                override = _post_process_llm(
+                    sys_prompt + vocab_hint + lang_hint,
+                    raw_text,
+                    config,
+                )
+                if override:
+                    final_text = override
+
+            # Post-proceso configurable (función 3): prompts editables seleccionables.
+            pp_cfg = config.get("post_process") or {}
+            if pp_cfg.get("enabled"):
+                prompts = pp_cfg.get("prompts", [])
+                sel_id = pp_cfg.get("selected_prompt")
+                sel = next((p for p in prompts if p.get("id") == sel_id), None)
+                if sel:
+                    pp_result = _post_process_llm(
+                        sel.get("prompt", ""),
+                        final_text,
+                        config,
+                    )
+                    if pp_result:
+                        final_text = pp_result
+
             # Modo vault: guardar en Obsidian
             if is_vault:
                 sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/obsidian-capture/scripts'))
@@ -474,6 +661,23 @@ def start_recording(mode_override=None, append=False):
             [sys.executable, watcher_path, str(proc.pid), os.path.realpath(__file__)],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
+    elif config.get("auto_stop") == "vad":
+        # VAD con suavizado (Silero/energía + onset/hangover/prefill) — función 1.
+        # vad.py captura por frames y escribe el WAV al cortar por silencio.
+        vad_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "vad.py")
+        vad_args = [sys.executable, vad_path,
+                    "--max-silence-ms", str(int(config.get("vad_max_silence_ms", 1500))),
+                    "--onset-ms", str(int(config.get("vad_onset_ms", 120))),
+                    "--hangover-ms", str(int(config.get("vad_hangover_ms", 500))),
+                    "--prefill-ms", str(int(config.get("vad_prefill_ms", 240)))]
+        if config.get("vad_use_silero"):
+            vad_args.append("--use-silero")
+        proc = subprocess.Popen(vad_args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        vad_watcher_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "vad_watcher.py")
+        subprocess.Popen(
+            [sys.executable, vad_watcher_path, os.path.realpath(__file__)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        )
     else:
         proc = subprocess.Popen(
             ["arecord", "-D", "default", "-f", "S16_LE", "-c", "1", "-r", "16000", AUDIO_FILE],
@@ -489,8 +693,16 @@ def start_recording(mode_override=None, append=False):
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     indicator_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "indicator.py")
-    subprocess.Popen([sys.executable, indicator_path],
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    overlay_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "overlay.py")
+    overlay_mode = config.get("overlay", "tray")
+    if os.path.exists(overlay_path):
+        subprocess.Popen(
+            [sys.executable, overlay_path, "--mode", overlay_mode],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+    elif os.path.exists(indicator_path):
+        subprocess.Popen([sys.executable, indicator_path],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     mode_name = config.get("modes", {}).get(mode_key, {}).get("name", mode_key)
     suffix = " [+append]" if append else ""
@@ -506,10 +718,14 @@ if __name__ == "__main__":
                         help="Agregar el texto al portapapeles existente en vez de reemplazarlo")
     parser.add_argument("--history", nargs="?", const=10, type=int, metavar="N",
                         help="Mostrar las últimas N entradas del historial (default: 10)")
+    parser.add_argument("--prompts", action="store_true",
+                        help="Listar los prompts de post-proceso configurables")
     args = parser.parse_args()
 
     if args.history is not None:
         show_history(args.history)
+    elif args.prompts:
+        show_post_process_prompts()
     elif os.path.exists(PID_FILE):
         stop_and_transcribe()
     else:
