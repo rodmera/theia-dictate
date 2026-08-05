@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Tests unitarios del smoothed VAD y utilidades de SuperDictate.
+"""Tests unitarios del smoothed VAD y utilidades de TheIA Dictate.
 
 Correr:  python3 -m pytest tests.py -q   (o)   python3 tests.py
 Sin dependencias de audio real: inyecta frames sintéticos al SmoothedVad.
@@ -23,14 +23,14 @@ import signal as _signal
 import json as _json
 import argparse as _argparse
 from datetime import datetime as _datetime
-_src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "super-dictate")).read()
+_src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "theia-dictate")).read()
 _main_split = _src.split("if __name__")[0]
 _ns = {
     "os": os, "re": _re, "sys": sys, "subprocess": _subprocess,
     "time": _time, "signal": _signal, "json": _json, "argparse": _argparse,
     "datetime": _datetime,
 }
-exec(compile(_main_split, "super-dictate", "exec"), _ns)
+exec(compile(_main_split, "theia-dictate", "exec"), _ns)
 is_blank_transcription = _ns["is_blank_transcription"]
 auto_detect_language = _ns["auto_detect_language"]
 

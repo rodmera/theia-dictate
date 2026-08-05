@@ -1,4 +1,4 @@
-# SuperDictate — Notas para Claude Code
+# TheIA Dictate — Notas para Claude Code
 
 ## Port a macOS (pendiente)
 
@@ -15,7 +15,7 @@ Solo hay que reemplazar 5 dependencias Linux-específicas:
 | Diálogo RAG | `zenity` | `osascript` AppleScript dialog |
 
 **Approach recomendado:** abstraer las 5 funciones en `platform_utils.py` con
-implementaciones `linux` / `macos`. El script `super-dictate` principal no
+implementaciones `linux` / `macos`. El script `theia-dictate` principal no
 necesita cambios estructurales.
 
 **No reescribir en Swift.** Python en macOS tiene soporte nativo completo.
@@ -44,7 +44,7 @@ sandboxing y haría el keystroke injection más difícil.
 
 | Archivo | Función |
 |---|---|
-| `super-dictate` | Script principal |
+| `theia-dictate` | Script principal |
 | `preloader.py` | Pre-carga Whisper en background |
 | `silence_watcher.py` | Monitorea PID de sox y dispara stop cuando termina |
 | `vad.py` | VAD con suavizado (onset/hangover/prefill) — energía o silero-vad |
@@ -56,8 +56,8 @@ sandboxing y haría el keystroke injection más difícil.
 
 ## Configuración
 
-Config en `~/.config/superdictate/config.json` (se crea automáticamente al primer uso):
-- `language`: idioma para Whisper (ej. "es", "en", "pt"). Pasa al pre-loader vía `/tmp/super-dictate-lang`.
+Config en `~/.config/theia_dictate/config.json` (se crea automáticamente al primer uso):
+- `language`: idioma para Whisper (ej. "es", "en", "pt"). Pasa al pre-loader vía `/tmp/theia-dictate-lang`.
 - `default_mode`: modo por defecto si no se pasa `--mode`.
 - `vocabulary`: lista de términos propios inyectados al prompt de Gemini (nombres, siglas, marcas).
 - `modes`: dict de modos. Cada modo tiene `name` y `prompt` que se añade al prompt de refined_text.
@@ -73,7 +73,7 @@ Los modos se activan con `--mode <clave>` o se configuran como `default_mode`.
 
 - `preloader.py` corre en background desde la primera pulsación
 - Carga WhisperModel turbo (~3.7s) mientras el usuario habla
-- Señaliza vía `/tmp/super-dictate-audio-ready` al parar la grabación
+- Señaliza vía `/tmp/theia-dictate-audio-ready` al parar la grabación
 - Latencia post-segunda-pulsación: ~10s (vs ~14s sin pre-loader)
 - Bottleneck restante: inferencia CPU ~5.4s (irreducible sin GPU/modelo más pequeño)
 

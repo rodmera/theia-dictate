@@ -2,7 +2,7 @@
 """VAD watcher — espera a que vad.py corte por silencio y dispara la transcripción.
 
 Similar a silence_watcher.py pero para el modo auto_stop='vad': vad.py escribe
-`/tmp/super-dictate-vad-status.json` cuando detecta fin de voz; este watcher lo
+`/tmp/theia-dictate-vad-status.json` cuando detecta fin de voz; este watcher lo
 espera y llama al script principal para transcribir.
 """
 import os
@@ -10,8 +10,8 @@ import subprocess
 import sys
 import time
 
-PID_FILE = "/tmp/super-dictate.pid"
-STATUS_FILE = "/tmp/super-dictate-vad-status.json"
+PID_FILE = "/tmp/theia-dictate.pid"
+STATUS_FILE = "/tmp/theia-dictate-vad-status.json"
 MAX_WAIT_S = 300
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""VAD con suavizado (onset/hangover/prefill) para SuperDictate.
+"""VAD con suavizado (onset/hangover/prefill) para TheIA Dictate.
 
 Reemplaza el auto-stop por silencio simple con detección de voz más robusta,
 imitando el `SmoothedVad` de Handy: no corta por un micro-silencio (hangover) ni
@@ -27,8 +27,8 @@ SAMPLE_WIDTH = 2  # S16_LE
 FRAME_MS = 30          # tamaño de frame en ms (compatible con Silero)
 FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000  # 480
 
-AUDIO_FILE = "/tmp/super-dictate-audio.wav"
-STATUS_FILE = "/tmp/super-dictate-vad-status.json"
+AUDIO_FILE = "/tmp/theia-dictate-audio.wav"
+STATUS_FILE = "/tmp/theia-dictate-vad-status.json"
 
 
 def _rms(ints):

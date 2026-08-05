@@ -9,13 +9,13 @@ from gi.repository import Gtk, AyatanaAppIndicator3
 
 def main():
     indicator = AyatanaAppIndicator3.Indicator.new(
-        "superdictate-indicator",
+        "theia_dictate-indicator",
         "media-record", # Icono de grabación rojo estándar de Ubuntu
         AyatanaAppIndicator3.IndicatorCategory.APPLICATION_STATUS)
     indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
     
     menu = Gtk.Menu()
-    item = Gtk.MenuItem(label="🔴 SuperDictate escuchando...")
+    item = Gtk.MenuItem(label="🔴 TheIA Dictate escuchando...")
     menu.append(item)
     menu.show_all()
     indicator.set_menu(menu)

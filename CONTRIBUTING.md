@@ -1,14 +1,14 @@
-# Contributing to SuperDictate
+# Contributing to TheIA Dictate
 
-Welcome! We are excited to have you contribute to SuperDictate. This project aims to bring a premium, AI-powered dictation and system automation experience natively to Linux (Wayland).
+Welcome! We are excited to have you contribute to TheIA Dictate. This project aims to bring a premium, AI-powered dictation and system automation experience natively to Linux (Wayland).
 
 ## 🚀 How to Contribute
 
 There are several ways to get involved:
 
 ### 1. Adding New Voice Commands (Intents)
-SuperDictate uses Gemini 3 Flash to route user intents. If you want to add a new voice command (e.g., "Translate this", "Play music"):
-- Open `super-dictate`.
+TheIA Dictate uses Gemini 3 Flash to route user intents. If you want to add a new voice command (e.g., "Translate this", "Play music"):
+- Open `theia-dictate`.
 - Locate the JSON schema inside the `stop_and_transcribe()` function.
 - Add your new command to the `command_type` description.
 - Add the corresponding `elif cmd == "your_command":` block below to handle the execution.
@@ -32,7 +32,7 @@ Since Linux environments vary wildly (GNOME, KDE, Hyprland), please open an Issu
    ```
 4. Run the script directly from your terminal to see the `print` outputs and debug:
    ```bash
-   ./super-dictate
+   ./theia-dictate
    ```
 
 ## 📝 Pull Request Process

@@ -1,6 +1,6 @@
-# SuperDictate 🎙️🤖
+# TheIA Dictate 🎙️🤖
 
-SuperDictate is a Linux-native, Wayland-compatible smart dictation tool. It uses a hybrid pipeline to achieve near-perfect transcription, auto-typing, and intelligent command routing.
+TheIA Dictate is a Linux-native, Wayland-compatible smart dictation tool. It uses a hybrid pipeline to achieve near-perfect transcription, auto-typing, and intelligent command routing.
 
 1. **Local Transcription:** Captures audio using `arecord` and transcribes it locally with `faster-whisper` (turbo model). A background pre-loader warms the model while you speak, eliminating cold-start latency (~3.7s saved).
 2. **Intent Analysis & Cloud Refinement:** Sends the raw transcription to **Gemini Flash**. The AI routes the audio to either:
@@ -39,7 +39,7 @@ SuperDictate is a Linux-native, Wayland-compatible smart dictation tool. It uses
 
 ## Configuration
 
-On first run, a config file is created at `~/.config/superdictate/config.json`:
+On first run, a config file is created at `~/.config/theia_dictate/config.json`:
 
 ```json
 {
@@ -58,7 +58,7 @@ On first run, a config file is created at `~/.config/superdictate/config.json`:
 
 You can add your own modes or edit the prompts freely. Use `--mode <name>` to activate a specific mode, or set `default_mode` in the config.
 
-The config file is created automatically with defaults on the first run of `super-dictate`.
+The config file is created automatically with defaults on the first run of `theia-dictate`.
 
 ## Architecture
 
@@ -86,13 +86,13 @@ Trigger the script via a custom keyboard shortcut (e.g., `Alt+Z`).
 
 To use a specific mode, pass `--mode` when binding the shortcut:
 ```bash
-super-dictate --mode email
-super-dictate --mode chat
-super-dictate --mode raw      # fastest: no Gemini call
-super-dictate --mode vault    # saves to Obsidian instead of pasting
-super-dictate --append        # appends to existing clipboard content
-super-dictate --history       # show last 10 transcriptions
-super-dictate --history 25    # show last 25
+theia-dictate --mode email
+theia-dictate --mode chat
+theia-dictate --mode raw      # fastest: no Gemini call
+theia-dictate --mode vault    # saves to Obsidian instead of pasting
+theia-dictate --append        # appends to existing clipboard content
+theia-dictate --history       # show last 10 transcriptions
+theia-dictate --history 25    # show last 25
 ```
 
 ### Push-to-talk

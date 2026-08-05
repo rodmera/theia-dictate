@@ -5,7 +5,7 @@ import sys
 import subprocess
 import time
 
-PID_FILE = "/tmp/super-dictate.pid"
+PID_FILE = "/tmp/theia-dictate.pid"
 
 
 def main():

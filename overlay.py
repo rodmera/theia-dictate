@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Overlay visual en vivo (estado de grabación) para SuperDictate.
+"""Overlay visual en vivo (estado de grabación) para TheIA Dictate.
 
 Complementa al tray (`indicator.py`) con un estado de texto simple y robusto:
   - mode "overlay": notifica decíclic para mostrar el estado mientras graba.
@@ -15,11 +15,11 @@ import signal
 import subprocess
 import sys
 
-PIDS_FILE = "/tmp/super-dictate-overlay.pid"
+PIDS_FILE = "/tmp/theia-dictate-overlay.pid"
 
 
 def _notify(msg, icon="media-record", expire=10000):
-    subprocess.run(["notify-send", "-t", str(expire), "-i", icon, "SuperDictate", msg])
+    subprocess.run(["notify-send", "-t", str(expire), "-i", icon, "TheIA Dictate", msg])
 
 
 def _write_self_pid():
@@ -60,13 +60,13 @@ def main():
         from gi.repository import Gtk, AyatanaAppIndicator3
 
         indicator = AyatanaAppIndicator3.Indicator.new(
-            "superdictate-overlay",
+            "theia_dictate-overlay",
             "media-record",
             AyatanaAppIndicator3.IndicatorCategory.APPLICATION_STATUS,
         )
         indicator.set_status(AyatanaAppIndicator3.IndicatorStatus.ACTIVE)
         menu = Gtk.Menu()
-        item = Gtk.MenuItem(label="🔴 SuperDictate escuchando...")
+        item = Gtk.MenuItem(label="🔴 TheIA Dictate escuchando...")
         menu.append(item)
         menu.show_all()
         indicator.set_menu(menu)

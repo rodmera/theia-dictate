@@ -11,10 +11,10 @@ import sys
 import json
 import time
 
-AUDIO_FILE     = '/tmp/super-dictate-audio.wav'
-READY_FILE     = '/tmp/super-dictate-audio-ready'
-RESULT_FILE    = '/tmp/super-dictate-transcription.json'
-MODEL_READY    = '/tmp/super-dictate-model-ready'
+AUDIO_FILE     = '/tmp/theia-dictate-audio.wav'
+READY_FILE     = '/tmp/theia-dictate-audio-ready'
+RESULT_FILE    = '/tmp/theia-dictate-transcription.json'
+MODEL_READY    = '/tmp/theia-dictate-model-ready'
 MAX_WAIT_S     = 120   # tiempo máx esperando que el usuario pare (2 min)
 
 sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/stt/scripts'))
@@ -45,7 +45,7 @@ def main():
         # Fase 3 — transcribir (modelo ya en memoria, rápido)
         language = 'es'
         try:
-            with open('/tmp/super-dictate-lang') as f:
+            with open('/tmp/theia-dictate-lang') as f:
                 language = f.read().strip()
         except FileNotFoundError:
             pass

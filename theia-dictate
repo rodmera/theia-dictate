@@ -16,16 +16,16 @@ try:
 except ImportError:
     EVDEV_AVAILABLE = False
 
-PID_FILE     = "/tmp/super-dictate.pid"
-AUDIO_FILE   = "/tmp/super-dictate-audio.wav"
-RESULT_FILE  = "/tmp/super-dictate-transcription.json"
-READY_FILE   = "/tmp/super-dictate-audio-ready"
-MODEL_READY  = "/tmp/super-dictate-model-ready"
-MODE_FILE    = "/tmp/super-dictate-mode"
-LANG_FILE    = "/tmp/super-dictate-lang"
-APPEND_FILE  = "/tmp/super-dictate-append"
-HISTORY_FILE = os.path.expanduser("~/.openclaw/workspace/memory/superdictate-history.jsonl")
-CONFIG_FILE  = os.path.expanduser("~/.config/superdictate/config.json")
+PID_FILE     = "/tmp/theia-dictate.pid"
+AUDIO_FILE   = "/tmp/theia-dictate-audio.wav"
+RESULT_FILE  = "/tmp/theia-dictate-transcription.json"
+READY_FILE   = "/tmp/theia-dictate-audio-ready"
+MODEL_READY  = "/tmp/theia-dictate-model-ready"
+MODE_FILE    = "/tmp/theia-dictate-mode"
+LANG_FILE    = "/tmp/theia-dictate-lang"
+APPEND_FILE  = "/tmp/theia-dictate-append"
+HISTORY_FILE = os.path.expanduser("~/.openclaw/workspace/memory/theia-dictate-history.jsonl")
+CONFIG_FILE  = os.path.expanduser("~/.config/theia-dictate/config.json")
 
 os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
 os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
@@ -172,11 +172,11 @@ def show_post_process_prompts():
     for p in prompts:
         mark = "-> " if p.get("id") == sel else "   "
         print(f"{mark}[{p.get('id')}] {p.get('name')}: {p.get('prompt','')[:70]}")
-    print("\nEditá ~/.config/superdictate/config.json -> post_process para cambiarlos.")
+    print("\nEditá ~/.config/theia-dictate/config.json -> post_process para cambiarlos.")
 
 
 def notify(msg, icon="audio-input-microphone", expire=2000):
-    subprocess.run(["notify-send", "-t", str(expire), "-i", icon, "SuperDictate", msg])
+    subprocess.run(["notify-send", "-t", str(expire), "-i", icon, "TheIA Dictate", msg])
 
 
 def simulate_paste():
@@ -462,7 +462,7 @@ def stop_and_transcribe():
                     "type": "STRING",
                     "description": (
                         f"Si is_command=false, texto final. Corrige errores fonéticos de Whisper y nombres propios "
-                        f"(Watson, Sherlock, Claude, TheIA, Entel, SuperDictate).{vocab_hint} "
+                        f"(Watson, Sherlock, Claude, TheIA, Entel, TheIA Dictate).{vocab_hint} "
                         f"Si el usuario enumera elementos, formatea como lista con saltos de línea reales.{mode_hint}"
                     )
                 }
@@ -477,7 +477,7 @@ def stop_and_transcribe():
             }
 
         prompt_llm = (
-            f"Eres el cerebro de SuperDictate. Decide si el texto es un dictado pasivo o una orden activa.\n"
+            f"Eres el cerebro de TheIA Dictate. Decide si el texto es un dictado pasivo o una orden activa.\n"
             f"Si el usuario pide a la máquina que haga algo (\"Abre el vault\", \"busca en mis notas X\", "
             f"\"recuérdame Y\", \"dile a Sherlock Z\"), marca is_command=true.\n"
             f"Si es texto para pegar o guardar, marca is_command=false.\n\n"
@@ -529,7 +529,7 @@ def stop_and_transcribe():
                                       '--text', answer_text,
                                       '--width=600', '--height=400'])
                 except FileNotFoundError:
-                    tmp_ans = "/tmp/superdictate-vault-answer.txt"
+                    tmp_ans = "/tmp/theia-dictate-vault-answer.txt"
                     with open(tmp_ans, "w") as fh:
                         fh.write(f"Busqueda: {arg}\n\n{answer_text}")
                     subprocess.Popen(["xdg-open", tmp_ans])
@@ -568,7 +568,7 @@ def stop_and_transcribe():
             provider_cfg = config.get("llm_provider") or {}
             if provider_cfg.get("provider") and provider_cfg.get("provider") != "gemini":
                 sys_prompt = (
-                    "Eres el corrector de SuperDictate. Corrige errores fonéticos de "
+                    "Eres el corrector de TheIA Dictate. Corrige errores fonéticos de "
                     "transcripción, respeta nombres propios y vocabulario del usuario."
                 )
                 vocab_hint = f" Vocabulario: {', '.join(config.get('vocabulary', []))}." \

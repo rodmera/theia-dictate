@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Daemon push-to-talk para SuperDictate.
+"""Daemon push-to-talk para TheIA Dictate.
 
 Mantén presionada la tecla PTT para grabar, suelta para transcribir.
-La tecla se configura en ~/.config/superdictate/config.json → "ptt_key".
+La tecla se configura en ~/.config/theia-dictate/config.json → "ptt_key".
 
 Uso: python3 ptt.py
      python3 ptt.py --key KEY_F9
@@ -20,9 +20,9 @@ except ImportError:
     print("evdev no instalado. Ejecuta: pip install evdev")
     sys.exit(1)
 
-CONFIG_FILE  = os.path.expanduser("~/.config/superdictate/config.json")
+CONFIG_FILE  = os.path.expanduser("~/.config/theia-dictate/config.json")
 SCRIPT_DIR   = os.path.dirname(os.path.realpath(__file__))
-SUPER_DICTATE = os.path.join(SCRIPT_DIR, "super-dictate")
+SUPER_DICTATE = os.path.join(SCRIPT_DIR, "theia-dictate")
 
 
 def load_ptt_key(override=None):
@@ -58,7 +58,7 @@ is_recording = False
 lock = threading.Lock()
 
 
-def trigger_super_dictate():
+def trigger_theia_dictate():
     subprocess.Popen([sys.executable, SUPER_DICTATE],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
@@ -70,10 +70,10 @@ def handle_event(event, key_code):
     with lock:
         if event.value == 1 and not is_recording:   # key down → iniciar
             is_recording = True
-            trigger_super_dictate()
+            trigger_theia_dictate()
         elif event.value == 0 and is_recording:      # key up → detener
             is_recording = False
-            trigger_super_dictate()
+            trigger_theia_dictate()
 
 
 def monitor_device(dev, key_code):
@@ -89,7 +89,7 @@ def monitor_device(dev, key_code):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="SuperDictate push-to-talk daemon")
+    parser = argparse.ArgumentParser(description="TheIA Dictate push-to-talk daemon")
     parser.add_argument("--key", default=None, help="Tecla PTT (ej. KEY_F9, KEY_RIGHTCTRL)")
     args = parser.parse_args()
 
@@ -99,7 +99,7 @@ def main():
         print("No se encontraron dispositivos de teclado.")
         sys.exit(1)
 
-    print(f"SuperDictate PTT activo — tecla: {key_name} — Ctrl+C para salir.")
+    print(f"TheIA Dictate PTT activo — tecla: {key_name} — Ctrl+C para salir.")
     print(f"Monitoreando {len(keyboards)} dispositivo(s).")
 
     threads = []
