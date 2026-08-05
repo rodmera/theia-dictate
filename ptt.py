@@ -22,7 +22,7 @@ except ImportError:
 
 CONFIG_FILE  = os.path.expanduser("~/.config/theia-dictate/config.json")
 SCRIPT_DIR   = os.path.dirname(os.path.realpath(__file__))
-SUPER_DICTATE = os.path.join(SCRIPT_DIR, "theia-dictate")
+THEIA_DICTATE = os.path.join(SCRIPT_DIR, "theia-dictate")
 
 
 def load_ptt_key(override=None):
@@ -59,7 +59,7 @@ lock = threading.Lock()
 
 
 def trigger_theia_dictate():
-    subprocess.Popen([sys.executable, SUPER_DICTATE],
+    subprocess.Popen([sys.executable, THEIA_DICTATE],
                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
