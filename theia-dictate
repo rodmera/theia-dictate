@@ -47,6 +47,8 @@ os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
 DEFAULT_CONFIG = {
     "language": "es",
     "default_mode": "default",
+    "stt_provider": "local",             # "local" (faster-whisper) | "gemini" (Google, sin costo)
+    "stt_gemini_model": "gemini-3.7-flash",
     "silence_timeout": None,
     "auto_stop": "silence",            # "silence" (sox, default) | "vad" (VAD suavizado)
     "vad_max_silence_ms": 1500,
@@ -409,6 +411,64 @@ def auto_detect_language(text):
     return "es"  # default conservador
 
 
+def _gemini_transcribe(audio_path, language="es", model="gemini-3.7-flash"):
+    """Transcripción de audio con Gemini (stt_provider=gemini).
+
+    Envía el WAV inline a la API de Gemini. Retorna dict con 'text' (misma
+    forma que stt.transcribe) para que el flujo de stop_and_transcribe no cambie.
+    """
+    import base64
+    import urllib.request
+    import urllib.error
+    import json as _json
+
+    sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills'))
+    try:
+        from shared_config import GEMINI_API_KEY
+    except Exception as key_err:
+        return {"error": f"shared_config/GEMINI_API_KEY: {key_err}"}
+
+    if not GEMINI_API_KEY:
+        return {"error": "GEMINI_API_KEY no configurada en el entorno del daemon"}
+
+    if not os.path.exists(audio_path):
+        return {"error": f"Archivo no encontrado: {audio_path}"}
+
+    with open(audio_path, "rb") as f:
+        audio_b64 = base64.b64encode(f.read()).decode()
+
+    url = (f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
+           f":generateContent?key={GEMINI_API_KEY}")
+    payload = {
+        "contents": [{
+            "parts": [
+                {"inline_data": {"mime_type": "audio/wav", "data": audio_b64}},
+                {"text": f"Transcribe el audio de voz en {language}. Devuelve SOLO el texto "
+                         f"transcrito literalmente, sin agregar puntuación ni correcciones."},
+            ]
+        }],
+        "generationConfig": {"temperature": 0.0}
+    }
+    req = urllib.request.Request(url, data=_json.dumps(payload).encode(),
+                                 headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = _json.loads(resp.read().decode())
+    except urllib.error.HTTPError as http_err:
+        body = http_err.read().decode(errors="replace")
+        return {"error": f"Gemini HTTP {http_err.code}: {body[:300]}"}
+    except Exception as net_err:
+        return {"error": f"Gemini red: {net_err}"}
+
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except (KeyError, IndexError):
+        return {"error": f"Gemini respuesta sin texto: {str(data)[:300]}"}
+
+    if not text:
+        return {"error": "Gemini no devolvió texto (¿audio silencioso?)"}
+    return {"text": text, "provider": "gemini", "model": model}
+
 
 def stop_and_transcribe():
     pid = None
@@ -465,18 +525,28 @@ def stop_and_transcribe():
     sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/stt/scripts'))
     sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills'))
 
+    stt_provider = config.get("stt_provider", "local")
+
     try:
-        # 1. Transcripción
-        res = _read_preloader_result()
-        if res is None:
-            debug_log("preloader: sin resultado, uso fallback directo")
-            try:
-                from stt import transcribe
-                res = transcribe(AUDIO_FILE, model_size="turbo", language=language, beam_size=5)
-            except Exception as transcribe_err:
-                debug_log(f"transcribe falló: {transcribe_err}")
-                notify(f"Error en transcripcion: {transcribe_err}", "dialog-error", 4000)
-                return
+        # 1. Transcripción (proveedor seleccionable: local faster-whisper o Gemini)
+        if stt_provider == "gemini":
+            debug_log("stt_provider=gemini: transcripción vía Gemini")
+            res = _gemini_transcribe(
+                AUDIO_FILE,
+                language=language,
+                model=config.get("stt_gemini_model", "gemini-3.7-flash"),
+            )
+        else:
+            res = _read_preloader_result()
+            if res is None:
+                debug_log("preloader: sin resultado, uso fallback directo")
+                try:
+                    from stt import transcribe
+                    res = transcribe(AUDIO_FILE, model_size="turbo", language=language, beam_size=5)
+                except Exception as transcribe_err:
+                    debug_log(f"transcribe falló: {transcribe_err}")
+                    notify(f"Error en transcripcion: {transcribe_err}", "dialog-error", 4000)
+                    return
         debug_log(f"res.transcribe: text={str(res.get('text',''))[:50]!r} error={res.get('error','')}")
 
         raw_text = res.get("text", "")
@@ -775,7 +845,7 @@ def start_recording(mode_override=None, append=False):
         pass
 
     preloader_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "preloader.py")
-    if os.path.exists(preloader_path):
+    if os.path.exists(preloader_path) and config.get("stt_provider", "local") != "gemini":
         subprocess.Popen([sys.executable, preloader_path],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
