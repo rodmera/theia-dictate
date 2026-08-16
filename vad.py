@@ -191,6 +191,29 @@ def _iter_arecord_frames(cmd):
             pass
 
 
+def _iter_wav_frames(path):
+    """Lee frames (ints, raw) desde un WAV mono/16kHz/S16_LE en vez del micrófono.
+
+    Usado por `--test-file` para probar el flujo VAD completo sin arecord.
+    """
+    import wave
+    with wave.open(path, "rb") as w:
+        if w.getnchannels() != 1 or w.getsampwidth() != 2 or w.getframerate() != SAMPLE_RATE:
+            raise ValueError(
+                f"WAV de test debe ser mono/16kHz/S16_LE (ch={w.getnchannels()} "
+                f"sr={w.getframerate()} sw={w.getsampwidth()})"
+            )
+        frame_bytes = FRAME_SAMPLES * CHANNELS * SAMPLE_WIDTH
+        while True:
+            chunk = w.readframes(FRAME_SAMPLES)
+            if not chunk:
+                break
+            if len(chunk) < frame_bytes:
+                chunk += b"\x00" * (frame_bytes - len(chunk))
+            ints = struct.unpack("<%dh" % (frame_bytes // SAMPLE_WIDTH), chunk[:frame_bytes])
+            yield list(ints), chunk[:frame_bytes]
+
+
 def _write_wav(path, raw_pcm):
     if not raw_pcm:
         return False
@@ -219,15 +242,20 @@ def main():
                     help="Usar silero-vad si está disponible (por defecto energía).")
     ap.add_argument("--max-recording-s", type=int, default=300)
     ap.add_argument("--status-file", default=STATUS_FILE)
+    ap.add_argument("--test-file",
+                    help="Leer de un WAV mono/16kHz/S16_LE en vez del micrófono (testing automático).")
     args = ap.parse_args()
 
-    cmd = ["arecord", "-D", "default", "-f", "S16_LE", "-c", str(CHANNELS),
-           "-r", str(SAMPLE_RATE), "-t", "raw"]
+    if args.test_file:
+        stream = _iter_wav_frames(args.test_file)
+    else:
+        cmd = ["arecord", "-D", "default", "-f", "S16_LE", "-c", str(CHANNELS),
+               "-r", str(SAMPLE_RATE), "-t", "raw"]
 
-    # Un SOLO stream de arecord para calibrar y escuchar: reiniciar el proceso
-    # perdía los primeros ~200-500ms si el usuario hablaba al arrancar y dejaba
-    # el prefill_buf vacío -> se comía la primera palabra ("Esto es una...").
-    stream = _iter_arecord_frames(cmd)
+        # Un SOLO stream de arecord para calibrar y escuchar: reiniciar el proceso
+        # perdía los primeros ~200-500ms si el usuario hablaba al arrancar y dejaba
+        # el prefill_buf vacío -> se comía la primera palabra ("Esto es una...").
+        stream = _iter_arecord_frames(cmd)
     detector = SileroVadBackend() if args.use_silero else EnergyVad()
 
     calib = []
