@@ -47,8 +47,11 @@ os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
 DEFAULT_CONFIG = {
     "language": "es",
     "default_mode": "default",
-    "stt_provider": "local",             # "local" (faster-whisper) | "gemini" (Google, sin costo)
+    "stt_provider": "local",             # "local" (faster-whisper) | "gemini" (Google AI Studio, sin costo) | "chirp" (Google Cloud STT)
     "stt_gemini_model": "gemini-3.7-flash",
+    "stt_chirp_model": "chirp_3",
+    "stt_chirp_region": "us",            # Chirp 3: multi-región "us"/"eu" (o europe-west2/3, asia-south1, northamerica-northeast1)
+    "stt_chirp_project": "",             # project id de theia para X-Goog-User-Project
     "silence_timeout": None,
     "auto_stop": "silence",            # "silence" (sox, default) | "vad" (VAD suavizado)
     "vad_max_silence_ms": 1500,
@@ -491,6 +494,81 @@ def _gemini_transcribe(audio_path, language="es", model="gemini-3.7-flash"):
     return {"text": text, "provider": "gemini", "model": model}
 
 
+def _chirp_transcribe(audio_path, language="es-419", model="chirp_3", project_id="", region="us"):
+    """Transcripción con Google Cloud Speech-to-Text V2 (Chirp 3, stt_provider=chirp).
+
+    Chirp 3 solo existe en la API V2 (endpoint regional + recognizer '_').
+    Usa el ADC de la cuenta theia (application_default_credentials_theia.json),
+    con quota project vía X-Goog-User-Project. Retorna dict con 'text' (misma
+    forma que stt.transcribe) para no cambiar el flujo de stop_and_transcribe.
+    """
+    import base64
+    import urllib.request
+    import urllib.error
+    import urllib.parse
+    import json as _json
+
+    adc_path = os.path.expanduser("~/.config/gcloud/application_default_credentials_theia.json")
+    if not os.path.exists(adc_path):
+        return {"error": f"Falta ADC de theia: {adc_path}"}
+    try:
+        adc = _json.load(open(adc_path))
+    except Exception as adc_err:
+        return {"error": f"ADC theia ilegible: {adc_err}"}
+
+    if not os.path.exists(audio_path):
+        return {"error": f"Archivo no encontrado: {audio_path}"}
+
+    token_data = urllib.parse.urlencode({
+        "client_id": adc.get("client_id", ""),
+        "client_secret": adc.get("client_secret", ""),
+        "refresh_token": adc.get("refresh_token", ""),
+        "grant_type": "refresh_token",
+    }).encode()
+    try:
+        at = _json.loads(urllib.request.urlopen(
+            urllib.request.Request("https://oauth2.googleapis.com/token", data=token_data),
+            timeout=20).read()).get("access_token", "")
+    except Exception as tok_err:
+        return {"error": f"Token theia: {tok_err}"}
+    if not at:
+        return {"error": "Token theia vacío (¿revocado?)"}
+
+    with open(audio_path, "rb") as f:
+        audio_b64 = base64.b64encode(f.read()).decode()
+
+    recognizer = f"projects/{project_id}/locations/{region}/recognizers/_"
+    payload = _json.dumps({
+        "config": {
+            "auto_decoding_config": {},
+            "language_codes": [language],
+            "model": model,
+            "features": {"enable_automatic_punctuation": True},
+        },
+        "content": audio_b64,
+    }).encode()
+    url = (f"https://{region}-speech.googleapis.com/v2/{recognizer}:recognize")
+    headers = {"Authorization": f"Bearer {at}", "Content-Type": "application/json",
+               "X-Goog-User-Project": project_id}
+    req = urllib.request.Request(url, data=payload, headers=headers)
+    try:
+        r = _json.loads(urllib.request.urlopen(req, timeout=120).read())
+    except urllib.error.HTTPError as http_err:
+        body = http_err.read().decode(errors="replace")
+        return {"error": f"Chirp HTTP {http_err.code}: {body[:300]}"}
+    except Exception as net_err:
+        return {"error": f"Chirp red: {net_err}"}
+
+    results = r.get("results", [])
+    if not results:
+        return {"error": "Chirp no devolvió resultados (¿silencio?)"}
+    text = " ".join(res.get("alternatives", [{}])[0].get("transcript", "")
+                    for res in results).strip()
+    if not text:
+        return {"error": "Chirp transcript vacío"}
+    return {"text": text, "provider": "chirp", "model": model}
+
+
 def stop_and_transcribe():
     pid = None
     for pf in (RECORDER_PID, PID_FILE):
@@ -556,6 +634,15 @@ def stop_and_transcribe():
                 AUDIO_FILE,
                 language=language,
                 model=config.get("stt_gemini_model", "gemini-3.7-flash"),
+            )
+        elif stt_provider == "chirp":
+            debug_log("stt_provider=chirp: transcripción vía Google Cloud STT")
+            res = _chirp_transcribe(
+                AUDIO_FILE,
+                language="es-419" if language == "es" else language,
+                model=config.get("stt_chirp_model", "chirp_3"),
+                project_id=config.get("stt_chirp_project", ""),
+                region=config.get("stt_chirp_region", "us"),
             )
         else:
             res = _read_preloader_result()
