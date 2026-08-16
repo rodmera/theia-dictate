@@ -248,8 +248,8 @@ def main():
                       prefill_ms=args.prefill_ms, max_silence_ms=args.max_silence_ms)
     # Alimentar el VAD con los frames de calibración: el prefill queda caliente
     # (si el usuario ya hablaba durante la calibración, no se pierde esa voz).
-    for frames, raw in calib_raw:
-        vad.push(frames, raw)
+    for _frames, _raw in zip(calib, calib_raw):
+        vad.push(_frames, _raw)
 
     started = time.time()
     stopped_by_vad = False
