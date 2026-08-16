@@ -19,6 +19,7 @@ import json
 import math
 import struct
 import subprocess
+import sys
 import time
 
 SAMPLE_RATE = 16000
@@ -40,11 +41,24 @@ def _rms(ints):
 class EnergyVad:
     """Detección de voz por energía RMS por frame. Sin dependencias externas."""
 
-    def __init__(self, threshold=0.012):
+    def __init__(self, threshold=0.02):
         self.threshold = threshold
 
     def frame_is_speech(self, frame):
         return _rms(frame) > self.threshold
+
+    def calibrate(self, frames):
+        """Ajusta el umbral al piso de ruido real del mic.
+
+        Si el umbral fijo (0.012-0.02) queda por debajo del ruido ambiente
+        (webcam: ~0.03), el ruido cuenta como 'voz' y el VAD nunca corta.
+        threshold = max(mediana_rms * 1.3, 0.02): el ambiente es silencio y
+        solo la voz (claramente por encima) dispara onset y corte.
+        """
+        if frames:
+            floors = sorted(_rms(f) for f in frames)
+            noise = floors[len(floors) // 2]
+            self.threshold = max(noise * 1.3, 0.02)
 
 
 class SileroVadBackend:
@@ -207,12 +221,22 @@ def main():
     ap.add_argument("--status-file", default=STATUS_FILE)
     args = ap.parse_args()
 
-    detector = SileroVadBackend() if args.use_silero else EnergyVad()
-    vad = SmoothedVad(detector, onset_ms=args.onset_ms, hangover_ms=args.hangover_ms,
-                      prefill_ms=args.prefill_ms, max_silence_ms=args.max_silence_ms)
-
     cmd = ["arecord", "-D", "default", "-f", "S16_LE", "-c", str(CHANNELS),
            "-r", str(SAMPLE_RATE), "-t", "raw"]
+
+    # Calibrar el piso de ruido con ~1s del mic antes de escuchar voz
+    calib = []
+    for frames, raw in _iter_arecord_frames(cmd):
+        calib.append(frames)
+        if len(calib) >= 30:
+            break
+    detector = SileroVadBackend() if args.use_silero else EnergyVad()
+    if isinstance(detector, EnergyVad):
+        detector.calibrate(calib)
+        print(f"calibrado: umbral energía = {detector.threshold:.4f}", file=sys.stderr)
+
+    vad = SmoothedVad(detector, onset_ms=args.onset_ms, hangover_ms=args.hangover_ms,
+                      prefill_ms=args.prefill_ms, max_silence_ms=args.max_silence_ms)
     started = time.time()
     stopped_by_vad = False
     written = False
