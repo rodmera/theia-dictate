@@ -28,6 +28,16 @@ LANG_FILE    = "/tmp/theia-dictate-lang"
 APPEND_FILE  = "/tmp/theia-dictate-append"
 CANCEL_FILE  = "/tmp/theia-dictate-cancel"
 MODE_REQUEST = "/tmp/theia-dictate-mode-request"
+DEBUG_FILE   = "/tmp/theia-dictate-debug.log"
+
+
+def debug_log(msg):
+    """Traza mínima del ciclo para diagnóstico (append-only)."""
+    try:
+        with open(DEBUG_FILE, "a", encoding="utf-8") as f:
+            f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
+    except Exception:
+        pass
 HISTORY_FILE = os.path.expanduser("~/.openclaw/workspace/memory/theia-dictate-history.jsonl")
 CONFIG_FILE  = os.path.expanduser("~/.config/theia-dictate/config.json")
 
@@ -459,24 +469,30 @@ def stop_and_transcribe():
         # 1. Transcripción
         res = _read_preloader_result()
         if res is None:
+            debug_log("preloader: sin resultado, uso fallback directo")
             try:
                 from stt import transcribe
                 res = transcribe(AUDIO_FILE, model_size="turbo", language=language, beam_size=5)
             except Exception as transcribe_err:
+                debug_log(f"transcribe falló: {transcribe_err}")
                 notify(f"Error en transcripcion: {transcribe_err}", "dialog-error", 4000)
                 return
+        debug_log(f"res.transcribe: text={str(res.get('text',''))[:50]!r} error={res.get('error','')}")
 
         raw_text = res.get("text", "")
         if not raw_text or "error" in res:
+            debug_log(f"error o silencio: {res.get('error', 'Audio vacio')}")
             notify(f"Error o silencio: {res.get('error', 'Audio vacio')}", "dialog-error", 3000)
             return
 
         # Filtro de transcripción en blanco (Handy): descartar ruido/puntuación suelta
         if is_blank_transcription(raw_text):
+            debug_log(f"transcripción en blanco: {raw_text!r}")
             notify("No se detectó voz (audio en blanco)", "dialog-warning", 2500)
             return
 
         log_history(raw_text=raw_text, refined_text="", is_cmd=False, mode=mode_key)
+        debug_log("historial: entrada raw escrita")
 
         # 2. Modo raw: bypass Gemini, pegar directamente
         if mode_key == "raw":
@@ -678,6 +694,7 @@ def stop_and_transcribe():
                     final_text = existing + " " + final_text
 
             insert_text(final_text)
+            debug_log(f"insert_text ejecutado (len={len(final_text)})")
             notify(f"Texto insertado [{mode_name}]", "emblem-default", 2000)
 
     except Exception as err:
@@ -804,7 +821,9 @@ def run_daemon():
         start_recording(mode_override=mode_req)
 
     def on_stop(signum, frame):
-        if read_state() != "recording":
+        st = read_state()
+        debug_log(f"on_stop: señal recibida, estado={st}")
+        if st != "recording":
             return
         # Cancelar = descartar sin transcribir
         if os.path.exists(CANCEL_FILE):
