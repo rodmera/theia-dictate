@@ -50,7 +50,9 @@ class EnergyVad:
 class SileroVadBackend:
     """silero-vad si está disponible; fallback a energía si no."""
 
-    def __init__(self, threshold=0.5):
+    def __init__(self, threshold=0.3):
+        # 0.5 es el default de silero (conservador); 0.3 detecta voz más suave
+        # / a distancia (mic de webcam), clave para dictado con mic USB lejano.
         self.threshold = threshold
         self.silero = None
         try:
