@@ -27,6 +27,7 @@ MODE_FILE    = "/tmp/theia-dictate-mode"
 LANG_FILE    = "/tmp/theia-dictate-lang"
 APPEND_FILE  = "/tmp/theia-dictate-append"
 CANCEL_FILE  = "/tmp/theia-dictate-cancel"
+MODE_REQUEST = "/tmp/theia-dictate-mode-request"
 HISTORY_FILE = os.path.expanduser("~/.openclaw/workspace/memory/theia-dictate-history.jsonl")
 CONFIG_FILE  = os.path.expanduser("~/.config/theia-dictate/config.json")
 
@@ -800,7 +801,19 @@ def run_daemon():
         # encoladas (ej. silence_watcher) durante una transcripción en curso.
         if read_state() != "idle":
             return
-        start_recording()
+        # Modo pedido por `record start --mode X` (keybind de vault, etc.)
+        mode_req = None
+        if os.path.exists(MODE_REQUEST):
+            try:
+                with open(MODE_REQUEST) as f:
+                    mode_req = f.read().strip() or None
+            except Exception:
+                pass
+            try:
+                os.remove(MODE_REQUEST)
+            except FileNotFoundError:
+                pass
+        start_recording(mode_override=mode_req)
 
     def on_stop(signum, frame):
         if read_state() != "recording":
@@ -844,8 +857,9 @@ def run_daemon():
         time.sleep(10)
 
 
-def record_cmd(cmd):
-    """Envía señales al daemon (start/stop/toggle/cancel)."""
+def record_cmd(cmd, mode=None):
+    """Envía señales al daemon (start/stop/toggle/cancel). `mode` se pasa a
+    `record start` para pedir un modo (ej. `--mode vault` desde el keybind)."""
     pid = daemon_pid()
     if not daemon_alive(pid):
         print("theia-dictate: daemon no está corriendo. Inicialo con: "
@@ -858,6 +872,13 @@ def record_cmd(cmd):
         os.kill(pid, signal.SIGUSR2)
         return 0
 
+    if cmd == "start" and mode:
+        try:
+            with open(MODE_REQUEST, 'w') as f:
+                f.write(mode)
+        except Exception:
+            pass
+
     if cmd == "start":
         os.kill(pid, signal.SIGUSR1)
     elif cmd == "stop":
@@ -865,7 +886,7 @@ def record_cmd(cmd):
     elif cmd == "toggle":
         os.kill(pid, signal.SIGUSR2 if read_state() == "recording" else signal.SIGUSR1)
     else:
-        print("Uso: record <start|stop|toggle|cancel>")
+        print("Uso: record <start|stop|toggle|cancel> [--mode <modo>]")
         return 1
     return 0
 
@@ -909,6 +930,8 @@ if __name__ == "__main__":
 
     p_record = sub.add_parser("record", help="Controlar la grabación del daemon")
     p_record.add_argument("action", choices=["start", "stop", "toggle", "cancel"])
+    p_record.add_argument("--mode", default=None,
+                          help="Modo de dictado para start (default, raw, email, chat, formal, notes, vault)")
 
     p_status = sub.add_parser("status", help="Estado del daemon (idle|recording|transcribing)")
     p_status.add_argument("--follow", action="store_true", help="Stream continuo (JSON)")
@@ -925,7 +948,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     if args.command == "record":
-        sys.exit(record_cmd(args.action))
+        sys.exit(record_cmd(args.action, mode=args.mode))
     if args.command == "status":
         sys.exit(status_cmd(follow=args.follow, fmt=args.format))
     if args.daemon:
