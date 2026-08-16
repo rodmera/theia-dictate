@@ -17,6 +17,8 @@ así no se necesita sounddevice. El audio capturado se escribe como WAV válido 
 import argparse
 import json
 import math
+import os
+import signal
 import struct
 import subprocess
 import sys
@@ -25,8 +27,8 @@ import time
 SAMPLE_RATE = 16000
 CHANNELS = 1
 SAMPLE_WIDTH = 2  # S16_LE
-FRAME_MS = 30          # tamaño de frame en ms (compatible con Silero)
-FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000  # 480
+FRAME_MS = 32          # tamaño de frame en ms (512 muestras, exigido por silero-vad >= 6.x)
+FRAME_SAMPLES = SAMPLE_RATE * FRAME_MS // 1000  # 512
 
 AUDIO_FILE = "/tmp/theia-dictate-audio.wav"
 STATUS_FILE = "/tmp/theia-dictate-vad-status.json"
@@ -50,14 +52,16 @@ class EnergyVad:
     def calibrate(self, frames):
         """Ajusta el umbral al piso de ruido real del mic.
 
-        Si el umbral fijo (0.012-0.02) queda por debajo del ruido ambiente
-        (webcam: ~0.03), el ruido cuenta como 'voz' y el VAD nunca corta.
-        threshold = max(mediana_rms * 1.3, 0.02): el ambiente es silencio y
-        solo la voz (claramente por encima) dispara onset y corte.
+        Usa el MÍNIMO de RMS de los frames de calibración como piso de ruido:
+        la mediana se contamina si el usuario ya está hablando durante la
+        calibración (el umbral quedaría en nivel de voz y nada se detecta).
+        El mínimo es robusto: basta un frame de silencio/ruido ambiente
+        (típico entre palabras o al arrancar) para fijar un umbral sano.
+        threshold = max(min_rms * 1.3, 0.02).
         """
         if frames:
             floors = sorted(_rms(f) for f in frames)
-            noise = floors[len(floors) // 2]
+            noise = floors[0]
             self.threshold = max(noise * 1.3, 0.02)
 
 
@@ -92,27 +96,36 @@ class SileroVadBackend:
 
 
 class SmoothedVad:
-    """Aplica onset/hangover/prefill sobre un detector de frames interno.
+    """VAD para auto-stop por silencio que NUNCA recorta la cabeza del audio.
+
+    Graba TODO desde el primer frame (t=0), como WhisperBox/Voxtype: el detector
+    solo decide CUÁNDO cortar (pausa de silencio), no qué audio se conserva.
+    Esto elimina la pérdida de la primera palabra: no hay onset que descarte
+    los frames iniciales ni prefill que no alcance a cubrir el arranque.
 
     Máquina de estados:
-      - Antes de entrar en habla: se requieren `onset_frames` consecutivos de voz.
-      - En habla: el hangover mantiene activa la grabación N frames tras la última
-        señal de voz; al agotarse (por un silencio), si la pausa llega a
+      - `recorded` acumula cada frame desde el inicio (siempre).
+      - Antes de entrar en habla: se requieren `onset_frames` consecutivos de voz
+        para marcar `speech_detected` (sirve para descartar grabaciones que no
+        tienen voz, no para recortar audio).
+      - En habla: el hangover mantiene el corte a la espera N frames tras la
+        última señal de voz; al agotarse (por un silencio), si la pausa llega a
         `max_idle_frames` sin reanudar, se corta la grabación.
-      - `prefill_frames` conserva audio previo al onset para no perder el inicio.
+      - `finalize()` (soltar tecla PTT / timeout) devuelve TODO lo grabado si
+        hubo voz.
     """
 
-    def __init__(self, detector, onset_ms=120, hangover_ms=500, prefill_ms=240,
+    def __init__(self, detector, onset_ms=120, hangover_ms=500, prefill_ms=1000,
                  max_silence_ms=1500):
         self.detector = detector
         self.frame_ms = FRAME_MS
         self.onset_frames = max(1, onset_ms // self.frame_ms)
         self.hangover_frames = max(0, hangover_ms // self.frame_ms)
-        self.prefill_frames = max(0, prefill_ms // self.frame_ms)
+        # prefill ya no se usa para el corte (grabamos desde t=0); se mantiene
+        # el parámetro por compatibilidad de firma.
         self.max_idle_frames = max(1, max_silence_ms // self.frame_ms)
 
-        self.prefill_buf = []       # raw bytes conservados (para no perder el inicio)
-        self.recorded = bytearray() # audio capturado desde el onset
+        self.recorded = bytearray()  # TODO el audio capturado desde t=0
         self.onset_counter = 0
         self.hangover_frames_left = 0
         self.idle_frames = 0
@@ -123,10 +136,8 @@ class SmoothedVad:
         """Feed de un frame. Retorna (done, final_audio_bytes_or_None)."""
         is_speech = self.detector.frame_is_speech(frame_int16)
 
-        # prefill: mantener un buffer rodante del audio previo al habla
-        self.prefill_buf.append(raw_bytes)
-        if len(self.prefill_buf) > self.prefill_frames:
-            self.prefill_buf.pop(0)
+        # Grabar SIEMPRE desde t=0: nunca recortar la cabeza del audio.
+        self.recorded.extend(raw_bytes)
 
         if not self.in_speech:
             if is_speech:
@@ -136,19 +147,14 @@ class SmoothedVad:
                     self.speech_detected = True
                     self.hangover_frames_left = self.hangover_frames
                     self.idle_frames = 0
-                    # arrancar con el prefill + este frame
-                    self.recorded = bytearray(b"".join(self.prefill_buf))
             else:
                 self.onset_counter = 0
             return False, None
 
-        # En habla: acumular audio
-        self.recorded.extend(raw_bytes)
-
+        # En habla: actualizar ventana de corte
         if is_speech:
             self.hangover_frames_left = self.hangover_frames
             self.idle_frames = 0
-            self.speech_detected = True
         else:
             self.hangover_frames_left -= 1
             self.idle_frames += 1
@@ -161,7 +167,7 @@ class SmoothedVad:
         return False, None
 
     def finalize(self):
-        """Llamada si se agotó el tiempo de grabación sin corte por VAD."""
+        """Llamada al agotar tiempo de grabación o por señal (soltar tecla PTT)."""
         self.in_speech = False
         return bytes(self.recorded) if self.speech_detected else None
 
@@ -231,20 +237,33 @@ def _write_wav(path, raw_pcm):
     return True
 
 
+STOP_REQUESTED = False
+
+
+def _on_signal(signum, frame):
+    """SIGINT/SIGTERM: soltar tecla PTT o detención del daemon -> finalizar ya."""
+    global STOP_REQUESTED
+    STOP_REQUESTED = True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--onset-ms", type=int, default=120)
     ap.add_argument("--hangover-ms", type=int, default=500)
-    ap.add_argument("--prefill-ms", type=int, default=240)
+    ap.add_argument("--prefill-ms", type=int, default=1000)
     ap.add_argument("--max-silence-ms", type=int, default=1500,
                     help="Pausa sin voz (post-hangover) que dispara el corte automático.")
-    ap.add_argument("--use-silero", action="store_true",
-                    help="Usar silero-vad si está disponible (por defecto energía).")
+    ap.add_argument("--use-silero", action="store_true", default=True,
+                    help="Usar silero-vad (por defecto). --no-silero fuerza energía.")
+    ap.add_argument("--no-silero", dest="use_silero", action="store_false")
     ap.add_argument("--max-recording-s", type=int, default=300)
     ap.add_argument("--status-file", default=STATUS_FILE)
     ap.add_argument("--test-file",
                     help="Leer de un WAV mono/16kHz/S16_LE en vez del micrófono (testing automático).")
     args = ap.parse_args()
+
+    signal.signal(signal.SIGINT, _on_signal)
+    signal.signal(signal.SIGTERM, _on_signal)
 
     if args.test_file:
         stream = _iter_wav_frames(args.test_file)
@@ -253,10 +272,12 @@ def main():
                "-r", str(SAMPLE_RATE), "-t", "raw"]
 
         # Un SOLO stream de arecord para calibrar y escuchar: reiniciar el proceso
-        # perdía los primeros ~200-500ms si el usuario hablaba al arrancar y dejaba
-        # el prefill_buf vacío -> se comía la primera palabra ("Esto es una...").
+        # perdía los primeros ~200-500ms si el usuario hablaba al arrancar.
         stream = _iter_arecord_frames(cmd)
-    detector = SileroVadBackend() if args.use_silero else EnergyVad()
+
+    # Silero por defecto: sin calibración de energía que pueda contaminarse si el
+    # usuario habla al arrancar (causa raíz de la primera palabra perdida).
+    detector = EnergyVad() if not args.use_silero else SileroVadBackend()
 
     calib = []
     calib_raw = []
@@ -274,8 +295,8 @@ def main():
 
     vad = SmoothedVad(detector, onset_ms=args.onset_ms, hangover_ms=args.hangover_ms,
                       prefill_ms=args.prefill_ms, max_silence_ms=args.max_silence_ms)
-    # Alimentar el VAD con los frames de calibración: el prefill queda caliente
-    # (si el usuario ya hablaba durante la calibración, no se pierde esa voz).
+    # Alimentar el VAD con los frames de calibración: como grabamos desde t=0,
+    # esa voz no se pierde y el estado queda caliente.
     for _frames, _raw in zip(calib, calib_raw):
         vad.push(_frames, _raw)
 
@@ -292,6 +313,8 @@ def main():
             break
         if time.time() - started > args.max_recording_s:
             break
+        if STOP_REQUESTED:
+            break
 
     if not stopped_by_vad:
         final_audio = vad.finalize()
@@ -302,7 +325,8 @@ def main():
         with open(args.status_file, "w") as f:
             json.dump({"stopped_by_vad": stopped_by_vad,
                        "detected": vad.speech_detected,
-                       "written": written}, f)
+                       "written": written,
+                       "stopped_by_signal": STOP_REQUESTED}, f)
     except Exception:
         pass
 

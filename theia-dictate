@@ -58,8 +58,8 @@ DEFAULT_CONFIG = {
     "vad_max_silence_ms": 1500,
     "vad_onset_ms": 120,
     "vad_hangover_ms": 500,
-    "vad_prefill_ms": 240,
-    "vad_use_silero": False,           # True si silero-vad está instalado
+    "vad_prefill_ms": 1000,
+    "vad_use_silero": True,            # silero-vad es el detector por defecto (sin calibración)
     "sherlock_to": "",
     "vocabulary": [],
     "modes": {

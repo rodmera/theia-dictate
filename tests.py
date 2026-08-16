@@ -76,15 +76,16 @@ class TestSmoothedVad(unittest.TestCase):
     def test_sustained_speech_then_silence_cuts(self):
         # Habla sostenida + pausa larga -> corte por VAD con audio
         timeline = [0] * 6 + [20000] * 12 + [0] * 60
-        # onset 120ms=4fr, hangover 500ms≈16fr, max_silence 1500ms≈50fr
+        # onset 120ms=3fr, hangover 500ms≈15fr, max_silence 1500ms≈46fr
         kw = dict(onset_ms=120, hangover_ms=500, prefill_ms=240, max_silence_ms=1500)
         d, final = _run_silence(EnergyVad(), timeline, **kw)
         self.assertTrue(d, "Debe cortar tras una pausa larga")
         self.assertTrue(final and len(final) > 0, "Debe producir audio")
 
-    def test_prefill_pads_start(self):
-        # El audio final debe incluir el prefill (frames previos al onset)
-        timeline = [5000] * 8 + [20000] * 10 + [0] * 60
+    def test_records_from_very_start(self):
+        # El audio final debe conservar TODO desde el primer frame (t=0),
+        # aunque la voz arranque en el primer frame (sin prefill que cubra).
+        timeline = [20000] * 12 + [0] * 60
         kw = dict(onset_ms=120, hangover_ms=500, prefill_ms=240, max_silence_ms=1500)
         inst = SmoothedVad(EnergyVad(), **kw)
         for amp in timeline:
@@ -92,9 +93,9 @@ class TestSmoothedVad(unittest.TestCase):
             if done:
                 break
         final = inst.finalize()
-        # 8 (pre) + ... al menos incluye 8 frames
         self.assertIsNotNone(final)
-        self.assertGreaterEqual(len(final) // (2 * FRAME_SAMPLES), 8)
+        # Debe incluir los frames de voz desde t=0 (no solo desde el onset+prefill)
+        self.assertGreaterEqual(len(final) // (2 * FRAME_SAMPLES), 12)
 
     def test_box_builds_with_arecord(self):
         # Solo verifica construcción del comando (sin ejecutar arecord real)
