@@ -224,11 +224,11 @@ def main():
     cmd = ["arecord", "-D", "default", "-f", "S16_LE", "-c", str(CHANNELS),
            "-r", str(SAMPLE_RATE), "-t", "raw"]
 
-    # Calibrar el piso de ruido con ~1s del mic antes de escuchar voz
+    # Calibrar el piso de ruido con ~0.45s del mic (15 frames) antes de escuchar voz
     calib = []
     for frames, raw in _iter_arecord_frames(cmd):
         calib.append(frames)
-        if len(calib) >= 30:
+        if len(calib) >= 15:
             break
     detector = SileroVadBackend() if args.use_silero else EnergyVad()
     if isinstance(detector, EnergyVad):
