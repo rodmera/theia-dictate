@@ -99,7 +99,7 @@ El script corre como daemon residente gestionado por systemd --user:
 
 ```bash
 systemctl --user start theia-dictate     # daemon (se inicia solo con la sesión)
-theia-dictate record toggle              # keybind SUPER+CTRL+X
+theia-dictate record toggle              # keybind SUPER+CTRL+G (Grabar)
 theia-dictate record start|stop|toggle|cancel
 theia-dictate status [--follow] [--format json]
 ```
