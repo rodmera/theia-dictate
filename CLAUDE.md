@@ -37,9 +37,9 @@ sandboxing y haría el keystroke injection más difícil.
 | Filtro de transcripción en blanco | automático tras transcribir — descarta ruido/puntuación suelta (`is_blank_transcription`) |
 | Post-proceso editable (multi-prompt) | `post_process.enabled: true` + `post_process.prompts` / `--prompts` — estilo Handy |
 | Proveedor LLM configurable | `llm_provider.provider: "openai"` (OpenAI-compatible) con `lang_detect` |
-| Overlay de estado | `overlay: "tray" | "overlay"` en config — usa `overlay.py` |
-| Push-to-talk | `ptt.py` daemon — monitorea tecla configurable con evdev |
-| **Daemon + señales** | `--daemon` (servicio systemd --user) — control por señales: `record start\|stop\|toggle\|cancel` (SIGUSR1/SIGUSR2), sin evdev para el control |
+| **OSD de estado** | `hyprctl notify` (OSD nativo de Hyprland, igual que el overlay de Voxtype) con fallback a notify-send |
+| **Push-to-talk nativo** | Binding de Hyprland con `release = true` (F9) — el compositor hace el PTT, no un daemon evdev |
+| **Daemon + señales** | `--daemon` (servicio systemd --user) — control por señales: `record start\|stop\|toggle\|cancel` (SIGUSR1/SIGUSR2) |
 | **Status para la barra** | `status [--follow] [--format json]` — estado idle/recording/transcribing |
 | **Typing real con wtype** | `insert_text()` intenta `wtype` (Hyprland/wlroots) y cae a clipboard+paste si falla |
 | **Pausa MPRIS** | Pausa los reproductores con `playerctl -a pause` al grabar; reanuda al terminar (guard si playerctl falta) |
@@ -53,10 +53,9 @@ sandboxing y haría el keystroke injection más difícil.
 | `silence_watcher.py` | Monitorea PID de sox y dispara stop cuando termina |
 | `vad.py` | VAD con suavizado (onset/hangover/prefill) — energía o silero-vad |
 | `vad_watcher.py` | Espera el corte del VAD y dispara la transcripción |
-| `overlay.py` | Overlay/tray de estado durante la grabación |
-| `ptt.py` | Daemon push-to-talk |
-| `indicator.py` | Icono de tray mientras graba |
 | `tests.py` | Tests unitarios (VAD, filtro blanco, detección de idioma) |
+
+> Nota (2026-08-16): `ptt.py`, `overlay.py` e `indicator.py` fueron eliminados — el PTT lo hace el compositor (binding `release=true`) y el OSD es `hyprctl notify`. No revivirlos.
 
 ## Configuración
 
@@ -68,7 +67,6 @@ Config en `~/.config/theia_dictate/config.json` (se crea automáticamente al pri
 - `auto_stop`: `"silence"` (sox, default) | `"vad"` (VAD suavizado). Con VAD: `vad_max_silence_ms`, `vad_onset_ms`, `vad_hangover_ms`, `vad_prefill_ms`, `vad_use_silero`.
 - `post_process`: `{ enabled, prompts: [{id,name,prompt}], selected_prompt }` — `--prompts` para listar, editar en el JSON.
 - `llm_provider`: `{ provider: "gemini"|"openai", openai_base_url, openai_api_key, openai_model, lang_detect }`.
-- `overlay`: `"tray"` (default) | `"overlay"`.
 
 Para agregar un modo custom, editar el JSON y añadir una clave nueva bajo `modes`.
 Los modos se activan con `--mode <clave>` o se configuran como `default_mode`.
@@ -83,15 +81,8 @@ Los modos se activan con `--mode <clave>` o se configuran como `default_mode`.
 
 ## Paste en Linux/Wayland
 
-Se usa `evdev`/`UInput` (Ctrl+Shift+V) porque en GNOME Wayland no hay
-alternativa universal:
-- `wtype` requiere protocolo wlroots (no disponible en GNOME)
-- `ydotool` versión repos Ubuntu no soporta Unicode sin daemon
-- `gdbus Shell.Eval` deshabilitado en GNOME moderno
-
-**En Hyprland/Omarchy** `wtype` sí funciona: `insert_text()` escribe el texto
-carácter por carácter en la ventana enfocada (inspiración Voxtype) y solo si
-falla cae al paste por clipboard + UInput.
+`insert_text()` intenta `wtype` (Hyprland/wlroots, funciona) y solo si falla cae a
+clipboard + paste por UInput (evdev). Inspiración Voxtype.
 
 ## Daemon + control por señales (estilo Voxtype, 2026-08-15)
 
@@ -110,6 +101,17 @@ theia-dictate status [--follow] [--format json]
 - **Carrera conocida (arreglada):** `silence_watcher` SIEMPRE manda `record stop` (nunca toggle) —
   un toggle tras el stop reiniciaba la grabación fantasma.
 - `on_start` solo arranca desde estado `idle` (evita señales encoladas que reinicien).
+
+## Push-to-talk nativo (2026-08-16, homologado a Voxtype)
+
+El PTT lo hace el compositor, no un daemon: en `~/.config/hypr/bindings.lua`,
+dos bindings sobre F9 — uno normal (start) y otro con `{ release = true }` (stop).
+Mismo patrón que el `voxtype.lua` de Omarchy. SUPER+CTRL+G queda como toggle.
+
+```lua
+o.bind("F9", "TheIA Dictate: grabar (push-to-talk)", "theia-dictate record start")
+o.bind("F9", "TheIA Dictate: transcribir (soltar)", "theia-dictate record stop", { release = true })
+```
 
 ## Entorno Python (venv)
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import re
+import shutil
 import sys
 import subprocess
 import time
@@ -59,7 +60,6 @@ DEFAULT_CONFIG = {
     "vad_hangover_ms": 500,
     "vad_prefill_ms": 240,
     "vad_use_silero": False,           # True si silero-vad está instalado
-    "ptt_key": "KEY_F9",
     "sherlock_to": "",
     "vocabulary": [],
     "modes": {
@@ -119,8 +119,7 @@ DEFAULT_CONFIG = {
         "openai_api_key": "",
         "openai_model": "gpt-4o-mini",
         "lang_detect": False
-    },
-    "overlay": "tray"
+    }
 }
 
 
@@ -230,7 +229,31 @@ def show_post_process_prompts():
     print("\nEditá ~/.config/theia-dictate/config.json -> post_process para cambiarlos.")
 
 
+_NOTIFY_COLORS = {
+    "audio-input-microphone": "rgb(34,197,94)",  # escuchando: verde
+    "media-record": "rgb(239,68,68)",            # grabando: rojo
+    "view-refresh": "rgb(234,179,8)",            # procesando: amarillo
+    "emblem-default": "rgb(34,197,94)",          # listo: verde
+    "dialog-error": "rgb(239,68,68)",            # error: rojo
+    "dialog-warning": "rgb(234,179,8)",          # aviso: amarillo
+}
+
+
 def notify(msg, icon="audio-input-microphone", expire=2000):
+    """OSD nativo de Hyprland (`hyprctl notify`) con fallback a notify-send.
+
+    Hyprland trae su propio OSD de capa-superficie (la misma idea del overlay
+    de Voxtype) — no hay que inventar un overlay GTK. En otros entornos sin
+    hyprctl se usa la notificación de escritorio estándar.
+    """
+    if shutil.which("hyprctl"):
+        color = _NOTIFY_COLORS.get(icon, "rgb(148,163,184)")
+        try:
+            subprocess.run(["hyprctl", "notify", "-1", str(int(expire)), color, msg],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return
+        except Exception:
+            pass
     subprocess.run(["notify-send", "-t", str(expire), "-i", icon, "TheIA Dictate", msg])
 
 
@@ -593,7 +616,7 @@ def stop_and_transcribe():
         except ProcessLookupError:
             pass
 
-    os.system("pkill -f 'indicator.py'; pkill -f 'overlay.py'")
+    os.system("pkill -f 'preloader.py'")
     time.sleep(0.2)
 
     # Leer estado persistido al iniciar grabación
@@ -1024,7 +1047,7 @@ def run_daemon():
                     os.remove(pf)
                 except FileNotFoundError:
                     pass
-            os.system("pkill -f 'indicator.py'; pkill -f 'overlay.py'; pkill -f 'preloader.py'")
+            os.system("pkill -f 'preloader.py'")
             os.system("killall arecord 2>/dev/null; pkill -f 'sox.*alsa' 2>/dev/null")
             set_state("idle")
             return
