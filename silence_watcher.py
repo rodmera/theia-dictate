@@ -24,7 +24,10 @@ def main():
 
     # Disparar stop solo si aún estamos en modo grabación
     if os.path.exists(PID_FILE):
-        subprocess.run([sys.executable, script_path])
+        # Siempre stop directo (nunca toggle): al terminar el silencio el
+        # recorder ya murió y un toggle reiniciaría la grabación por carrera
+        # con el stop de stop_and_transcribe (incidente 2026-08-15).
+        subprocess.run([sys.executable, script_path, "record", "stop"])
 
 
 if __name__ == '__main__':

@@ -39,6 +39,10 @@ sandboxing y haría el keystroke injection más difícil.
 | Proveedor LLM configurable | `llm_provider.provider: "openai"` (OpenAI-compatible) con `lang_detect` |
 | Overlay de estado | `overlay: "tray" | "overlay"` en config — usa `overlay.py` |
 | Push-to-talk | `ptt.py` daemon — monitorea tecla configurable con evdev |
+| **Daemon + señales** | `--daemon` (servicio systemd --user) — control por señales: `record start\|stop\|toggle\|cancel` (SIGUSR1/SIGUSR2), sin evdev para el control |
+| **Status para la barra** | `status [--follow] [--format json]` — estado idle/recording/transcribing |
+| **Typing real con wtype** | `insert_text()` intenta `wtype` (Hyprland/wlroots) y cae a clipboard+paste si falla |
+| **Pausa MPRIS** | Pausa los reproductores con `playerctl -a pause` al grabar; reanuda al terminar (guard si playerctl falta) |
 
 ## Archivos del proyecto
 
@@ -84,6 +88,41 @@ alternativa universal:
 - `wtype` requiere protocolo wlroots (no disponible en GNOME)
 - `ydotool` versión repos Ubuntu no soporta Unicode sin daemon
 - `gdbus Shell.Eval` deshabilitado en GNOME moderno
+
+**En Hyprland/Omarchy** `wtype` sí funciona: `insert_text()` escribe el texto
+carácter por carácter en la ventana enfocada (inspiración Voxtype) y solo si
+falla cae al paste por clipboard + UInput.
+
+## Daemon + control por señales (estilo Voxtype, 2026-08-15)
+
+El script corre como daemon residente gestionado por systemd --user:
+
+```bash
+systemctl --user start theia-dictate     # daemon (se inicia solo con la sesión)
+theia-dictate record toggle              # keybind SUPER+CTRL+X
+theia-dictate record start|stop|toggle|cancel
+theia-dictate status [--follow] [--format json]
+```
+
+- Señales: SIGUSR1 = start, SIGUSR2 = stop&transcribir (cancel = archivo de cancelación).
+- Estado en `/tmp/theia-dictate-state` (idle|recording|transcribing).
+- El recorder (sox/arecord/vad) es subproceso del daemon; su PID va en `/tmp/theia-dictate-recorder.pid`.
+- **Carrera conocida (arreglada):** `silence_watcher` SIEMPRE manda `record stop` (nunca toggle) —
+  un toggle tras el stop reiniciaba la grabación fantasma.
+- `on_start` solo arranca desde estado `idle` (evita señales encoladas que reinicien).
+
+## Entorno Python (venv)
+
+El proyecto corre con el venv `./.venv` (`--system-site-packages`). El script
+se re-ejecuta solo con el python del venv si `faster_whisper` no es importable
+(bootstrap al inicio de `__main__`). Crear el venv:
+
+```bash
+python3 -m venv --system-site-packages .venv
+.venv/bin/pip install faster-whisper
+```
+
+Deps de sistema: `python-evdev`, `sox`, `zenity` (Arch); `playerctl` opcional (pausa MPRIS).
 
 ## 🔒 Prevención de colisiones entre agentes
 
