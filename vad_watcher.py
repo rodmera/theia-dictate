@@ -35,9 +35,11 @@ def main():
             return
         time.sleep(0.1)
 
-    # Disparar stop solo si seguimos en modo grabación
+    # Disparar stop solo si seguimos en modo grabación.
+    # Siempre `record stop` (nunca toggle): tras el corte de voz un toggle
+    # reiniciaría la grabación por carrera con stop_and_transcribe.
     if os.path.exists(PID_FILE):
-        subprocess.run([sys.executable, script_path])
+        subprocess.run([sys.executable, script_path, "record", "stop"])
 
 
 if __name__ == "__main__":
