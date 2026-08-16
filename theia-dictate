@@ -414,6 +414,33 @@ def auto_detect_language(text):
     return "es"  # default conservador
 
 
+def _wav_with_leading_silence(audio_path, silence_ms=250):
+    """Devuelve bytes de un WAV con `silence_ms` de silencio al inicio.
+
+    El audio grabado arranca abrupto (sílaba inicial en 0ms) y los modelos
+    (Gemini y Chirp) a veces la tratan como ruido de inicio y omiten la
+    primera palabra. Con silencio previo el onset de habla queda limpio.
+    """
+    import io as _io
+    import wave as _wave
+    with _wave.open(audio_path, "rb") as w:
+        sr = w.getframerate()
+        sampwidth = w.getsampwidth()
+        ch = w.getnchannels()
+        nframes = w.getnframes()
+        frames = w.readframes(nframes)
+    silence_frames = int(sr * silence_ms / 1000)
+    silence = b"\x00" * (silence_frames * sampwidth * ch)
+    buf = _io.BytesIO()
+    with _wave.open(buf, "wb") as nw:
+        nw.setnchannels(ch)
+        nw.setsampwidth(sampwidth)
+        nw.setframerate(sr)
+        nw.setnframes(nframes + silence_frames)
+        nw.writeframes(silence + frames)
+    return buf.getvalue()
+
+
 def _gemini_transcribe(audio_path, language="es", model="gemini-3.7-flash"):
     """Transcripción de audio con Gemini (stt_provider=gemini).
 
@@ -437,29 +464,7 @@ def _gemini_transcribe(audio_path, language="es", model="gemini-3.7-flash"):
     if not os.path.exists(audio_path):
         return {"error": f"Archivo no encontrado: {audio_path}"}
 
-    # Prepend 250ms de silencio: el audio arranca abrupto (sílaba inicial en 0ms) y
-    # Gemini a veces la trata como ruido de inicio y omite la primera palabra.
-    # Con silencio previo el onset de habla queda limpio y la transcripción es
-    # estable entre runs (verificado: ~25% de omisión sin esto, 0% con esto).
-    import io as _io
-    import wave as _wave
-    with _wave.open(audio_path, "rb") as w:
-        sr = w.getframerate()
-        sampwidth = w.getsampwidth()
-        ch = w.getnchannels()
-        nframes = w.getnframes()
-        frames = w.readframes(nframes)
-    silence_ms = 250
-    silence_frames = int(sr * silence_ms / 1000)
-    silence = b"\x00" * (silence_frames * sampwidth * ch)
-    buf = _io.BytesIO()
-    with _wave.open(buf, "wb") as nw:
-        nw.setnchannels(ch)
-        nw.setsampwidth(sampwidth)
-        nw.setframerate(sr)
-        nw.setnframes(nframes + silence_frames)
-        nw.writeframes(silence + frames)
-    audio_b64 = base64.b64encode(buf.getvalue()).decode()
+    audio_b64 = base64.b64encode(_wav_with_leading_silence(audio_path)).decode()
 
     url = (f"https://generativelanguage.googleapis.com/v1beta/models/{model}"
            f":generateContent?key={GEMINI_API_KEY}")
@@ -534,8 +539,7 @@ def _chirp_transcribe(audio_path, language="es-419", model="chirp_3", project_id
     if not at:
         return {"error": "Token theia vacío (¿revocado?)"}
 
-    with open(audio_path, "rb") as f:
-        audio_b64 = base64.b64encode(f.read()).decode()
+    audio_b64 = base64.b64encode(_wav_with_leading_silence(audio_path)).decode()
 
     recognizer = f"projects/{project_id}/locations/{region}/recognizers/_"
     payload = _json.dumps({

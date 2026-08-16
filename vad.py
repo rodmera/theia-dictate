@@ -224,24 +224,38 @@ def main():
     cmd = ["arecord", "-D", "default", "-f", "S16_LE", "-c", str(CHANNELS),
            "-r", str(SAMPLE_RATE), "-t", "raw"]
 
-    # Calibrar el piso de ruido con ~0.45s del mic (15 frames) antes de escuchar voz
-    calib = []
-    for frames, raw in _iter_arecord_frames(cmd):
-        calib.append(frames)
-        if len(calib) >= 15:
-            break
+    # Un SOLO stream de arecord para calibrar y escuchar: reiniciar el proceso
+    # perdía los primeros ~200-500ms si el usuario hablaba al arrancar y dejaba
+    # el prefill_buf vacío -> se comía la primera palabra ("Esto es una...").
+    stream = _iter_arecord_frames(cmd)
     detector = SileroVadBackend() if args.use_silero else EnergyVad()
+
+    calib = []
+    calib_raw = []
+    for _ in range(15):
+        try:
+            frames, raw = next(stream)
+        except StopIteration:
+            break
+        calib.append(frames)
+        calib_raw.append(raw)
+
     if isinstance(detector, EnergyVad):
         detector.calibrate(calib)
         print(f"calibrado: umbral energía = {detector.threshold:.4f}", file=sys.stderr)
 
     vad = SmoothedVad(detector, onset_ms=args.onset_ms, hangover_ms=args.hangover_ms,
                       prefill_ms=args.prefill_ms, max_silence_ms=args.max_silence_ms)
+    # Alimentar el VAD con los frames de calibración: el prefill queda caliente
+    # (si el usuario ya hablaba durante la calibración, no se pierde esa voz).
+    for frames, raw in calib_raw:
+        vad.push(frames, raw)
+
     started = time.time()
     stopped_by_vad = False
     written = False
 
-    for frames, raw in _iter_arecord_frames(cmd):
+    for frames, raw in stream:
         done, final_audio = vad.push(frames, raw)
         if done:
             stopped_by_vad = True
