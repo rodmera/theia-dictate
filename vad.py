@@ -64,7 +64,12 @@ class SileroVadBackend:
             try:
                 import numpy as np
                 x = np.array(frame_int16, dtype=np.float32) / 32768.0
-                return bool(self.silero.predict_chunk(x) > self.threshold)
+                if hasattr(self.silero, "predict_chunk"):
+                    # silero-vad <= 4.x
+                    return bool(self.silero.predict_chunk(x) > self.threshold)
+                # silero-vad >= 6.x: forward(tensor, sr)
+                import torch
+                return bool(self.silero(torch.from_numpy(x), SAMPLE_RATE).item() > self.threshold)
             except Exception:
                 pass
         return _rms(frame_int16) > 0.012
