@@ -37,11 +37,11 @@ sandboxing y haría el keystroke injection más difícil.
 | Filtro de transcripción en blanco | automático tras transcribir — descarta ruido/puntuación suelta (`is_blank_transcription`) |
 | Post-proceso editable (multi-prompt) | `post_process.enabled: true` + `post_process.prompts` / `--prompts` — estilo Handy |
 | Proveedor LLM configurable | `llm_provider.provider: "openai"` (OpenAI-compatible) con `lang_detect` |
-| **OSD de estado** | `hyprctl notify` (OSD nativo de Hyprland, igual que el overlay de Voxtype) con fallback a notify-send |
+| **Notificaciones de estado** | `notify-send` estándar (no usar OSD de hyprctl — se ve horrible) |
 | **Push-to-talk nativo** | Binding de Hyprland con `release = true` (F9) — el compositor hace el PTT, no un daemon evdev |
 | **Daemon + señales** | `--daemon` (servicio systemd --user) — control por señales: `record start\|stop\|toggle\|cancel` (SIGUSR1/SIGUSR2) |
 | **Status para la barra** | `status [--follow] [--format json]` — estado idle/recording/transcribing |
-| **Typing real con wtype** | `insert_text()` intenta `wtype` (Hyprland/wlroots) y cae a clipboard+paste si falla |
+| **Inserción por portapapeles** | `insert_text()` copia con `wl-copy` y pega `Ctrl+Shift+V` vía wtype (estándar de las apps consolidadas); NUNCA teclear carácter por carácter (wtype pierde puntuación/números). Fallback: pegado virtual UInput |
 | **Pausa MPRIS** | Pausa los reproductores con `playerctl -a pause` al grabar; reanuda al terminar (guard si playerctl falta) |
 
 ## Archivos del proyecto
@@ -55,7 +55,7 @@ sandboxing y haría el keystroke injection más difícil.
 | `vad_watcher.py` | Espera el corte del VAD y dispara la transcripción |
 | `tests.py` | Tests unitarios (VAD, filtro blanco, detección de idioma) |
 
-> Nota (2026-08-16): `ptt.py`, `overlay.py` e `indicator.py` fueron eliminados — el PTT lo hace el compositor (binding `release=true`) y el OSD es `hyprctl notify`. No revivirlos.
+> Nota (2026-08-16): `ptt.py`, `overlay.py` e `indicator.py` fueron eliminados — el PTT lo hace el compositor (binding `release=true`). No revivirlos. Las notificaciones son `notify-send` estándar, no el OSD de hyprctl.
 
 ## Configuración
 

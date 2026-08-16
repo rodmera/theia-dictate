@@ -229,31 +229,12 @@ def show_post_process_prompts():
     print("\nEditá ~/.config/theia-dictate/config.json -> post_process para cambiarlos.")
 
 
-_NOTIFY_COLORS = {
-    "audio-input-microphone": "rgb(34,197,94)",  # escuchando: verde
-    "media-record": "rgb(239,68,68)",            # grabando: rojo
-    "view-refresh": "rgb(234,179,8)",            # procesando: amarillo
-    "emblem-default": "rgb(34,197,94)",          # listo: verde
-    "dialog-error": "rgb(239,68,68)",            # error: rojo
-    "dialog-warning": "rgb(234,179,8)",          # aviso: amarillo
-}
-
-
 def notify(msg, icon="audio-input-microphone", expire=2000):
-    """OSD nativo de Hyprland (`hyprctl notify`) con fallback a notify-send.
+    """Notificación de escritorio estándar vía notify-send.
 
-    Hyprland trae su propio OSD de capa-superficie (la misma idea del overlay
-    de Voxtype) — no hay que inventar un overlay GTK. En otros entornos sin
-    hyprctl se usa la notificación de escritorio estándar.
+    Este es el esquema que funciona y se ve bien; no se usa el OSD de
+    hyprctl (se ve horrible en pantalla).
     """
-    if shutil.which("hyprctl"):
-        color = _NOTIFY_COLORS.get(icon, "rgb(148,163,184)")
-        try:
-            subprocess.run(["hyprctl", "notify", "-1", str(int(expire)), color, msg],
-                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            return
-        except Exception:
-            pass
     subprocess.run(["notify-send", "-t", str(expire), "-i", icon, "TheIA Dictate", msg])
 
 
@@ -280,21 +261,24 @@ def simulate_paste():
 
 
 def insert_text(text):
-    """Inserta texto en el foco: primero typing real con wtype (Hyprland/wlroots),
-    fallback a clipboard + Ctrl+Shift+V (simulate_paste).
+    """Inserta texto en el foco. Estándar de las apps de dictado consolidadas
+    (Superwhisper, Wisp, Mac Whisper): copiar al portapapeles y pegar.
 
-    `wtype` escribe carácter por carácter en la ventana enfocada y no depende
-    del portapapeles ni de inyectar atajos (inspiración Voxtype).
+    NUNCA teclear carácter por carácter con wtype: en textos con puntuación o
+    números se pierden caracteres (la transcripción queda completa pero lo que
+    se escribe no). Paste universal Ctrl+Shift+V (funciona en terminales y apps
+    GUI) vía wtype; fallback a pegado virtual UInput si wtype no está.
     """
-    if text:
-        wtype = subprocess.run(["wtype", text],
-                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if wtype.returncode == 0:
-            return
-    # Fallback: clipboard + pegado virtual
+    if not text:
+        return
     if not _copy_to_clipboard(text):
         notify("Error al copiar al portapapeles", "dialog-error", 3000)
         return
+    if shutil.which("wtype"):
+        paste = subprocess.run(["wtype", "-M", "ctrl", "-M", "shift", "-k", "v"],
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if paste.returncode == 0:
+            return
     simulate_paste()
 
 

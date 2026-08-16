@@ -1,17 +1,17 @@
 # TheIA Dictate 🎙️🤖
 
-Dictado inteligente nativo de Linux (Wayland/Hyprland), homologado a los patrones de las apps de dictado consolidadas (Voxtype y similares): **push-to-talk nativo del compositor**, **auto-stop por VAD**, **OSD del compositor**, y **post-proceso por IA**.
+Dictado inteligente nativo de Linux (Wayland/Hyprland), homologado a los patrones de las apps de dictado consolidadas (Voxtype y similares): **push-to-talk nativo del compositor**, **auto-stop por VAD**, **notificaciones de escritorio estándar**, y **post-proceso por IA**.
 
 1. **Transcripción:** captura con `arecord`, transcribe con el proveedor configurado — `local` (faster-whisper turbo, offline), `gemini` (gemini-3.7-flash) o `chirp` (Google Cloud STT, `chirp_3`).
 2. **Intención y post-proceso:** Gemini arregla errores fonéticos y respeta tu vocabulario, o parsea un comando activo (abrir proyecto, consultar el vault, agregar tarea Todoist, preguntarle a Sherlock).
-3. **Auto-typing:** inserta en el cursor con `wtype` (fallback: clipboard + pegar).
+3. **Auto-typing:** copia al portapapeles y pega en el cursor (`Ctrl+Shift+V` vía wtype) — el estándar de las apps de dictado consolidadas; nunca teclea carácter por carácter (se pierden caracteres).
 
 ## Prerequisites
 - `arecord` (alsa-utils), `sox` (auto-stop por silencio), `wtype`, `wl-clipboard`
 - `playerctl` (opcional: pausa MPRIS al dictar)
 - Para el proveedor `local`: `faster-whisper` (instalado en `.venv`)
 - Para `chirp`: ADC de Google Cloud (`~/.config/gcloud/application_default_credentials_theia.json`) + proyecto con Speech API
-- OSD nativo de Hyprland (`hyprctl notify`); fuera de Hyprland cae a `notify-send`
+- `notify-send` (notificaciones de estado)
 
 ## Features
 - **Push-to-talk nativo:** F9 para grabar mientras lo mantienes, soltar para transcribir (binding de Hyprland con `release = true`, igual que Voxtype). También hay toggle.
@@ -24,7 +24,7 @@ Dictado inteligente nativo de Linux (Wayland/Hyprland), homologado a los patrone
 - **Post-process editable:** prompts configurables en `post_process` (multi-prompt).
 - **Custom Vocabulary:** tus términos (nombres, siglas, marcas) en el config.
 - **Comandos por voz:** *"Abre el proyecto CreaEfecto"*, *"Abre el vault"*, *"Busca en mis notas sobre TheIA"*, *"Recuérdame llamar a cliente mañana"*, *"Dile a Sherlock que revise mi correo"*.
-- **OSD de estado:** `hyprctl notify` (nativo de Hyprland) para escuchando/procesando/listo.
+- **Notificaciones de estado:** `notify-send` estándar para escuchando/procesando/listo.
 
 ## Architecture
 
