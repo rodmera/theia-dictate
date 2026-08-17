@@ -506,7 +506,57 @@ def _gemini_transcribe(audio_path, language="es", model="gemini-3.7-flash"):
     return {"text": text, "provider": "gemini", "model": model}
 
 
-def _chirp_transcribe(audio_path, language="es-419", model="chirp_3", project_id="", region="us"):
+def _get_chirp_access_token(adc_path=None):
+    """Obtiene un access token OAuth fresco para Google Cloud STT / Chirp.
+
+    Lee las credenciales ADC de la cuenta TheIA. En caso de error HTTP (ej. 400 Bad Request),
+    extrae e interpreta el cuerpo JSON devuelto por Google (ej. 'invalid_rapt', reauth expirado),
+    evitando silenciar el diagnóstico real bajo un mensaje genérico.
+    """
+    import urllib.request
+    import urllib.error
+    import urllib.parse
+    import json as _json
+
+    if adc_path is None:
+        adc_path = os.path.expanduser("~/.config/gcloud/application_default_credentials_theia.json")
+    if not os.path.exists(adc_path):
+        return None, f"Falta ADC de theia: {adc_path}"
+    try:
+        with open(adc_path) as f:
+            adc = _json.load(f)
+    except Exception as adc_err:
+        return None, f"ADC theia ilegible: {adc_err}"
+
+    token_data = urllib.parse.urlencode({
+        "client_id": adc.get("client_id", ""),
+        "client_secret": adc.get("client_secret", ""),
+        "refresh_token": adc.get("refresh_token", ""),
+        "grant_type": "refresh_token",
+    }).encode()
+    try:
+        req = urllib.request.Request("https://oauth2.googleapis.com/token", data=token_data)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            at = _json.loads(resp.read().decode()).get("access_token", "")
+        if not at:
+            return None, "Token theia vacío (¿revocado?)"
+        return at, None
+    except urllib.error.HTTPError as http_err:
+        body = http_err.read().decode(errors="replace")
+        try:
+            err_data = _json.loads(body)
+            desc = err_data.get("error_description") or err_data.get("error") or body
+            subtype = err_data.get("error_subtype")
+            if subtype and subtype not in desc:
+                desc = f"{desc} ({subtype})"
+        except Exception:
+            desc = body[:300]
+        return None, f"Token theia HTTP {http_err.code}: {desc}"
+    except Exception as tok_err:
+        return None, f"Token theia: {tok_err}"
+
+
+def _chirp_transcribe(audio_path, language="es-419", model="chirp_3", project_id="", region="us", adc_path=None):
     """Transcripción con Google Cloud Speech-to-Text V2 (Chirp 3, stt_provider=chirp).
 
     Chirp 3 solo existe en la API V2 (endpoint regional + recognizer '_').
@@ -517,34 +567,16 @@ def _chirp_transcribe(audio_path, language="es-419", model="chirp_3", project_id
     import base64
     import urllib.request
     import urllib.error
-    import urllib.parse
     import json as _json
-
-    adc_path = os.path.expanduser("~/.config/gcloud/application_default_credentials_theia.json")
-    if not os.path.exists(adc_path):
-        return {"error": f"Falta ADC de theia: {adc_path}"}
-    try:
-        adc = _json.load(open(adc_path))
-    except Exception as adc_err:
-        return {"error": f"ADC theia ilegible: {adc_err}"}
 
     if not os.path.exists(audio_path):
         return {"error": f"Archivo no encontrado: {audio_path}"}
 
-    token_data = urllib.parse.urlencode({
-        "client_id": adc.get("client_id", ""),
-        "client_secret": adc.get("client_secret", ""),
-        "refresh_token": adc.get("refresh_token", ""),
-        "grant_type": "refresh_token",
-    }).encode()
-    try:
-        at = _json.loads(urllib.request.urlopen(
-            urllib.request.Request("https://oauth2.googleapis.com/token", data=token_data),
-            timeout=20).read()).get("access_token", "")
-    except Exception as tok_err:
-        return {"error": f"Token theia: {tok_err}"}
+    at, tok_err = _get_chirp_access_token(adc_path=adc_path)
+    if tok_err:
+        return {"error": tok_err}
     if not at:
-        return {"error": "Token theia vacío (¿revocado?)"}
+        return {"error": "Token theia no disponible"}
 
     audio_b64 = base64.b64encode(_wav_with_leading_silence(audio_path)).decode()
 
@@ -563,7 +595,8 @@ def _chirp_transcribe(audio_path, language="es-419", model="chirp_3", project_id
                "X-Goog-User-Project": project_id}
     req = urllib.request.Request(url, data=payload, headers=headers)
     try:
-        r = _json.loads(urllib.request.urlopen(req, timeout=120).read())
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            r = _json.loads(resp.read().decode())
     except urllib.error.HTTPError as http_err:
         body = http_err.read().decode(errors="replace")
         return {"error": f"Chirp HTTP {http_err.code}: {body[:300]}"}
@@ -578,6 +611,92 @@ def _chirp_transcribe(audio_path, language="es-419", model="chirp_3", project_id
     if not text:
         return {"error": "Chirp transcript vacío"}
     return {"text": text, "provider": "chirp", "model": model}
+
+
+def _local_transcribe(audio_path, language="es"):
+    """Transcripción con Whisper local (faster-whisper)."""
+    if not os.path.exists(audio_path):
+        return {"error": f"Archivo no encontrado: {audio_path}"}
+    res = _read_preloader_result()
+    if res is not None and isinstance(res, dict) and not res.get("error"):
+        if "provider" not in res:
+            res["provider"] = "local"
+        return res
+    debug_log("preloader: sin resultado, uso fallback directo faster-whisper")
+    try:
+        sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/stt/scripts'))
+        from stt import transcribe
+        res = transcribe(audio_path, model_size="turbo", language=language, beam_size=5)
+        if isinstance(res, dict):
+            if "provider" not in res:
+                res["provider"] = "local"
+            return res
+        return {"text": str(res), "provider": "local", "model": "turbo"}
+    except Exception as transcribe_err:
+        debug_log(f"Whisper local falló: {transcribe_err}")
+        return {"error": f"Whisper local: {transcribe_err}"}
+
+
+def transcribe_audio(audio_path, language="es", config=None):
+    """
+    Transcribe audio usando el proveedor configurado con fallback automático en cascada.
+    Cadena de resolución:
+      - Proveedor principal (stt_provider)
+      - Proveedores de fallback si el principal falla por credenciales, red o API
+    """
+    if config is None:
+        config = load_config()
+
+    primary_provider = config.get("stt_provider", "local")
+    providers_order = [primary_provider]
+    for alt in ["gemini", "local", "chirp"]:
+        if alt not in providers_order:
+            providers_order.append(alt)
+
+    failed_attempts = []
+    lang_for_chirp = "es-419" if language == "es" else language
+
+    for idx, prov in enumerate(providers_order):
+        debug_log(f"Intentando transcripción con '{prov}' (intento {idx+1}/{len(providers_order)})")
+        res = None
+        if prov == "gemini":
+            res = _gemini_transcribe(
+                audio_path,
+                language=language,
+                model=config.get("stt_gemini_model", "gemini-3.7-flash"),
+            )
+        elif prov == "chirp":
+            res = _chirp_transcribe(
+                audio_path,
+                language=lang_for_chirp,
+                model=config.get("stt_chirp_model", "chirp_3"),
+                project_id=config.get("stt_chirp_project", ""),
+                region=config.get("stt_chirp_region", "us"),
+            )
+        elif prov == "local":
+            res = _local_transcribe(audio_path, language=language)
+
+        if not isinstance(res, dict):
+            res = {"error": f"Respuesta inesperada de {prov}"}
+
+        text = res.get("text", "")
+        err = res.get("error")
+
+        if text and not err:
+            if prov != primary_provider:
+                res["fallback_from"] = primary_provider
+                res["failed_attempts"] = failed_attempts
+                debug_log(f"✅ Fallback exitoso con '{prov}' (falló {primary_provider})")
+            return res
+        else:
+            failed_attempts.append({"provider": prov, "error": err or "Sin texto"})
+            debug_log(f"⚠️ Proveedor '{prov}' falló: {err}")
+
+    primary_err = failed_attempts[0]["error"] if failed_attempts else "Desconocido"
+    return {
+        "error": f"Todos los proveedores STT fallaron ({primary_provider}: {primary_err})",
+        "failed_attempts": failed_attempts,
+    }
 
 
 def stop_and_transcribe():
@@ -638,41 +757,18 @@ def stop_and_transcribe():
     stt_provider = config.get("stt_provider", "local")
 
     try:
-        # 1. Transcripción (proveedor seleccionable: local faster-whisper o Gemini)
-        if stt_provider == "gemini":
-            debug_log("stt_provider=gemini: transcripción vía Gemini")
-            res = _gemini_transcribe(
-                AUDIO_FILE,
-                language=language,
-                model=config.get("stt_gemini_model", "gemini-3.7-flash"),
-            )
-        elif stt_provider == "chirp":
-            debug_log("stt_provider=chirp: transcripción vía Google Cloud STT")
-            res = _chirp_transcribe(
-                AUDIO_FILE,
-                language="es-419" if language == "es" else language,
-                model=config.get("stt_chirp_model", "chirp_3"),
-                project_id=config.get("stt_chirp_project", ""),
-                region=config.get("stt_chirp_region", "us"),
-            )
-        else:
-            res = _read_preloader_result()
-            if res is None:
-                debug_log("preloader: sin resultado, uso fallback directo")
-                try:
-                    from stt import transcribe
-                    res = transcribe(AUDIO_FILE, model_size="turbo", language=language, beam_size=5)
-                except Exception as transcribe_err:
-                    debug_log(f"transcribe falló: {transcribe_err}")
-                    notify(f"Error en transcripcion: {transcribe_err}", "dialog-error", 4000)
-                    return
-        debug_log(f"res.transcribe: text={str(res.get('text',''))[:50]!r} error={res.get('error','')}")
+        # 1. Transcripción con fallback automático en cascada
+        res = transcribe_audio(AUDIO_FILE, language=language, config=config)
+        debug_log(f"res.transcribe: provider={res.get('provider')} text={str(res.get('text',''))[:50]!r} error={res.get('error','')}")
 
         raw_text = res.get("text", "")
         if not raw_text or "error" in res:
             debug_log(f"error o silencio: {res.get('error', 'Audio vacio')}")
-            notify(f"Error o silencio: {res.get('error', 'Audio vacio')}", "dialog-error", 3000)
+            notify(f"Error o silencio: {res.get('error', 'Audio vacio')}", "dialog-error", 3500)
             return
+
+        if res.get("fallback_from"):
+            notify(f"Fallback STT: {res['fallback_from']} falló, usando {res.get('provider', 'STT')}", "dialog-warning", 3000)
 
         # Filtro de transcripción en blanco (Handy): descartar ruido/puntuación suelta
         if is_blank_transcription(raw_text):
@@ -1108,6 +1204,150 @@ def status_cmd(follow=False, fmt="text"):
         _time.sleep(1)
 
 
+def audit_providers(config=None):
+    """Auditoría y diagnóstico del estado de proveedores STT y credenciales."""
+    if config is None:
+        config = load_config()
+
+    report = {
+        "config_file": CONFIG_FILE,
+        "config_exists": os.path.exists(CONFIG_FILE),
+        "stt_provider": config.get("stt_provider", "local"),
+        "language": config.get("language", "es"),
+        "auto_stop": config.get("auto_stop", "silence"),
+        "providers": {},
+    }
+
+    # 1. Chirp STT
+    adc_path = os.path.expanduser("~/.config/gcloud/application_default_credentials_theia.json")
+    chirp_status = {
+        "adc_path": adc_path,
+        "adc_exists": os.path.exists(adc_path),
+        "project_id": config.get("stt_chirp_project", ""),
+        "region": config.get("stt_chirp_region", "us"),
+        "model": config.get("stt_chirp_model", "chirp_3"),
+        "token_ok": False,
+        "error": None,
+    }
+    if chirp_status["adc_exists"]:
+        at, tok_err = _get_chirp_access_token(adc_path)
+        if at:
+            chirp_status["token_ok"] = True
+            chirp_status["status"] = "OK"
+        else:
+            chirp_status["token_ok"] = False
+            chirp_status["error"] = tok_err
+            if tok_err and "invalid_rapt" in str(tok_err):
+                chirp_status["reauth_required"] = True
+                chirp_status["reauth_command"] = "gcloud auth application-default login"
+    else:
+        chirp_status["error"] = f"Archivo ADC no existe: {adc_path}"
+    report["providers"]["chirp"] = chirp_status
+
+    # 2. Gemini STT
+    sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills'))
+    gemini_key = None
+    try:
+        from shared_config import GEMINI_API_KEY
+        gemini_key = GEMINI_API_KEY
+    except Exception:
+        gemini_key = os.getenv("GEMINI_API_KEY")
+
+    report["providers"]["gemini"] = {
+        "model": config.get("stt_gemini_model", "gemini-3.7-flash"),
+        "has_api_key": bool(gemini_key),
+        "status": "OK" if gemini_key else "FAIL (GEMINI_API_KEY no configurada)",
+    }
+
+    # 3. Local Whisper
+    has_faster_whisper = False
+    try:
+        import faster_whisper
+        has_faster_whisper = True
+    except ImportError:
+        pass
+
+    report["providers"]["local"] = {
+        "faster_whisper_installed": has_faster_whisper,
+        "status": "OK" if has_faster_whisper else "WARN (faster_whisper no importable en este python)",
+    }
+
+    # 4. Sistema y Herramientas
+    pid = daemon_pid()
+    alive = daemon_alive(pid)
+    tools = {}
+    for tool in ["wtype", "wl-copy", "wl-paste", "notify-send", "arecord", "sox", "playerctl"]:
+        tools[tool] = bool(os.system(f"which {tool} >/dev/null 2>&1") == 0)
+
+    report["system"] = {
+        "daemon_pid": pid,
+        "daemon_alive": alive,
+        "audio_file_exists": os.path.exists(AUDIO_FILE),
+        "audio_file_size": os.path.getsize(AUDIO_FILE) if os.path.exists(AUDIO_FILE) else 0,
+        "tools": tools,
+    }
+
+    return report
+
+
+def doctor_cmd(fmt="text"):
+    """Ejecuta diagnóstico de proveedores STT y credenciales."""
+    report = audit_providers()
+    if fmt == "json":
+        print(json.dumps(report, indent=2))
+        return 0
+
+    print("════════════════════════════════════════════════════════════")
+    print(" THEIA DICTATE — DIAGNÓSTICO DE PROVEEDORES Y CREDENCIALES")
+    print("════════════════════════════════════════════════════════════")
+    print(f"• Config: {report['config_file']} ({'OK' if report['config_exists'] else 'NO ENCONTRADO'})")
+    print(f"• Proveedor STT principal: {report['stt_provider']}")
+    print(f"• Idioma: {report['language']} | Auto-stop: {report['auto_stop']}")
+    print("")
+
+    # Chirp
+    ch = report["providers"]["chirp"]
+    print("1. Google Cloud STT (Chirp 3):")
+    if ch.get("token_ok"):
+        print("   ✅ Token OAuth válido y activo")
+    else:
+        print(f"   ❌ Fallo de token: {ch.get('error')}")
+        if ch.get("reauth_required"):
+            print("   ⚠️  ACCION REQUERIDA (Rodrigo): RAPT expirado (política Google Workspace).")
+            print(f"      Ejecutar en terminal: {ch.get('reauth_command')}")
+            print(f"      Luego mover credenciales a: {ch.get('adc_path')}")
+
+    # Gemini
+    gm = report["providers"]["gemini"]
+    print("2. Google Gemini STT:")
+    if gm.get("has_api_key"):
+        print(f"   ✅ API Key presente (modelo: {gm['model']})")
+    else:
+        print("   ❌ GEMINI_API_KEY no configurada")
+
+    # Local
+    loc = report["providers"]["local"]
+    print("3. Whisper Local (faster-whisper):")
+    if loc.get("faster_whisper_installed"):
+        print("   ✅ faster-whisper disponible")
+    else:
+        print("   ⚠️  faster-whisper no instalado en entorno actual")
+
+    # Sistema
+    sys_info = report["system"]
+    print("")
+    print("4. Estado del Daemon y Sistema:")
+    print(f"   • Daemon: {'ACTIVO (PID ' + str(sys_info['daemon_pid']) + ')' if sys_info['daemon_alive'] else 'DETENIDO'}")
+    missing_tools = [t for t, ok in sys_info["tools"].items() if not ok and t != "playerctl"]
+    if missing_tools:
+        print(f"   ⚠️  Herramientas faltantes: {', '.join(missing_tools)}")
+    else:
+        print("   ✅ Herramientas de sistema presentes (wtype, wl-copy, notify-send, etc.)")
+
+    print("════════════════════════════════════════════════════════════")
+    return 0
+
+
 if __name__ == "__main__":
     # Auto-bootstrap: si corre con el python del sistema y hay un .venv junto al
     # script, re-ejecutarse con el python del venv. Check por ruta (sin importar
@@ -1131,6 +1371,9 @@ if __name__ == "__main__":
     p_status.add_argument("--follow", action="store_true", help="Stream continuo (JSON)")
     p_status.add_argument("--format", choices=["text", "json"], default="text")
 
+    p_doctor = sub.add_parser("doctor", help="Auditoría y diagnóstico de proveedores y credenciales")
+    p_doctor.add_argument("--format", choices=["text", "json"], default="text")
+
     parser.add_argument("--mode", default=None,
                         help="Modo de dictado: default, raw, email, chat, formal, notes, vault")
     parser.add_argument("--append", action="store_true",
@@ -1139,12 +1382,17 @@ if __name__ == "__main__":
                         help="Mostrar las últimas N entradas del historial (default: 10)")
     parser.add_argument("--prompts", action="store_true",
                         help="Listar los prompts de post-proceso configurables")
+    parser.add_argument("--doctor", action="store_true",
+                        help="Auditoría y diagnóstico de proveedores y credenciales")
     args = parser.parse_args()
 
     if args.command == "record":
         sys.exit(record_cmd(args.action, mode=args.mode))
     if args.command == "status":
         sys.exit(status_cmd(follow=args.follow, fmt=args.format))
+    if args.command == "doctor" or args.doctor:
+        fmt = getattr(args, "format", "text") if args.command == "doctor" else "text"
+        sys.exit(doctor_cmd(fmt=fmt))
     if args.daemon:
         run_daemon()
         sys.exit(0)

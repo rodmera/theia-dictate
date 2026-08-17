@@ -33,6 +33,13 @@ _ns = {
 exec(compile(_main_split, "theia-dictate", "exec"), _ns)
 is_blank_transcription = _ns["is_blank_transcription"]
 auto_detect_language = _ns["auto_detect_language"]
+_get_chirp_access_token = _ns["_get_chirp_access_token"]
+_chirp_transcribe = _ns["_chirp_transcribe"]
+_gemini_transcribe = _ns["_gemini_transcribe"]
+_local_transcribe = _ns["_local_transcribe"]
+transcribe_audio = _ns["transcribe_audio"]
+audit_providers = _ns["audit_providers"]
+doctor_cmd = _ns["doctor_cmd"]
 
 FRAME_SAMPLES = vad.FRAME_SAMPLES
 
@@ -117,6 +124,150 @@ class TestUtilidades(unittest.TestCase):
 
     def test_lang_detect_accented_spanish(self):
         self.assertEqual(auto_detect_language("Esto es una prueba de dictado con tildes por favor"), "es")
+
+
+class TestChirpTokenRefreshAndErrors(unittest.TestCase):
+    def test_http_error_400_extracts_invalid_rapt(self):
+        from unittest.mock import patch, MagicMock
+        import urllib.error
+        import tempfile
+
+        # Crear ADC temporal
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json") as f:
+            _json.dump({
+                "client_id": "test_client_id",
+                "client_secret": "test_secret",
+                "refresh_token": "test_refresh_token",
+            }, f)
+            tmp_adc = f.name
+
+        try:
+            error_body = _json.dumps({
+                "error": "invalid_grant",
+                "error_description": "reauth related error (invalid_rapt)",
+                "error_uri": "https://support.google.com/a/answer/9368756",
+                "error_subtype": "invalid_rapt"
+            }).encode("utf-8")
+
+            mock_fp = io.BytesIO(error_body)
+            http_err = urllib.error.HTTPError(
+                url="https://oauth2.googleapis.com/token",
+                code=400,
+                msg="Bad Request",
+                hdrs={},
+                fp=mock_fp
+            )
+
+            with patch("urllib.request.urlopen", side_effect=http_err):
+                at, err = _get_chirp_access_token(adc_path=tmp_adc)
+                self.assertIsNone(at)
+                self.assertIsNotNone(err)
+                self.assertIn("invalid_rapt", err)
+                self.assertIn("400", err)
+                self.assertIn("reauth related error", err)
+        finally:
+            if os.path.exists(tmp_adc):
+                os.remove(tmp_adc)
+
+    def test_missing_adc_file_returns_error(self):
+        at, err = _get_chirp_access_token(adc_path="/tmp/non_existent_adc_file_12345.json")
+        self.assertIsNone(at)
+        self.assertIn("Falta ADC", err)
+
+    def test_valid_token_returns_access_token(self):
+        from unittest.mock import patch, MagicMock
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json") as f:
+            _json.dump({
+                "client_id": "test_client_id",
+                "client_secret": "test_secret",
+                "refresh_token": "test_refresh_token",
+            }, f)
+            tmp_adc = f.name
+
+        try:
+            mock_resp = MagicMock()
+            mock_resp.read.return_value = _json.dumps({"access_token": "ya29.test_valid_token_123"}).encode()
+            mock_resp.__enter__.return_value = mock_resp
+
+            with patch("urllib.request.urlopen", return_value=mock_resp):
+                at, err = _get_chirp_access_token(adc_path=tmp_adc)
+                self.assertEqual(at, "ya29.test_valid_token_123")
+                self.assertIsNone(err)
+        finally:
+            if os.path.exists(tmp_adc):
+                os.remove(tmp_adc)
+
+
+class TestSttProviderFallback(unittest.TestCase):
+    def test_chirp_fails_falls_back_to_gemini(self):
+        from unittest.mock import patch
+
+        cfg = {
+            "stt_provider": "chirp",
+            "stt_chirp_project": "test-project",
+            "stt_gemini_model": "gemini-3.7-flash",
+        }
+
+        with patch.dict(_ns, {
+            "_chirp_transcribe": lambda *a, **k: {"error": "Token theia HTTP 400: reauth related error (invalid_rapt)"},
+            "_gemini_transcribe": lambda *a, **k: {"text": "Texto transcrito por Gemini fallback", "provider": "gemini", "model": "gemini-3.7-flash"},
+        }):
+            res = _ns["transcribe_audio"]("/tmp/test.wav", language="es", config=cfg)
+            self.assertEqual(res.get("text"), "Texto transcrito por Gemini fallback")
+            self.assertEqual(res.get("provider"), "gemini")
+            self.assertEqual(res.get("fallback_from"), "chirp")
+
+    def test_chirp_and_gemini_fail_falls_back_to_local(self):
+        from unittest.mock import patch
+
+        cfg = {
+            "stt_provider": "chirp",
+            "stt_chirp_project": "test-project",
+        }
+
+        with patch.dict(_ns, {
+            "_chirp_transcribe": lambda *a, **k: {"error": "Token error"},
+            "_gemini_transcribe": lambda *a, **k: {"error": "Gemini rate limit 429"},
+            "_local_transcribe": lambda *a, **k: {"text": "Texto transcrito por Whisper local", "provider": "local", "model": "turbo"},
+        }):
+            res = _ns["transcribe_audio"]("/tmp/test.wav", language="es", config=cfg)
+            self.assertEqual(res.get("text"), "Texto transcrito por Whisper local")
+            self.assertEqual(res.get("provider"), "local")
+            self.assertEqual(res.get("fallback_from"), "chirp")
+
+    def test_all_providers_fail_returns_consolidated_error(self):
+        from unittest.mock import patch
+
+        cfg = {
+            "stt_provider": "chirp",
+        }
+
+        with patch.dict(_ns, {
+            "_chirp_transcribe": lambda *a, **k: {"error": "Chirp token expirado"},
+            "_gemini_transcribe": lambda *a, **k: {"error": "Gemini sin red"},
+            "_local_transcribe": lambda *a, **k: {"error": "Faster-whisper OOM"},
+        }):
+            res = _ns["transcribe_audio"]("/tmp/test.wav", language="es", config=cfg)
+            self.assertIn("error", res)
+            self.assertIn("Todos los proveedores STT fallaron", res["error"])
+            self.assertEqual(len(res.get("failed_attempts", [])), 3)
+
+
+class TestDoctorDiagnostics(unittest.TestCase):
+    def test_audit_providers_identifies_invalid_rapt(self):
+        from unittest.mock import patch
+
+        with patch.dict(_ns, {
+            "_get_chirp_access_token": lambda adc_path=None: (None, "Token theia HTTP 400: reauth related error (invalid_rapt)"),
+        }):
+            report = _ns["audit_providers"]()
+            self.assertIn("providers", report)
+            chirp_rep = report["providers"].get("chirp", {})
+            self.assertFalse(chirp_rep.get("token_ok"))
+            self.assertTrue(chirp_rep.get("reauth_required"))
+            self.assertIn("gcloud auth application-default login", chirp_rep.get("reauth_command", ""))
 
 
 if __name__ == "__main__":

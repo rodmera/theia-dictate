@@ -43,6 +43,8 @@ sandboxing y haría el keystroke injection más difícil.
 | **Status para la barra** | `status [--follow] [--format json]` — estado idle/recording/transcribing |
 | **Inserción por portapapeles** | `insert_text()` copia con `wl-copy` y pega `Ctrl+Shift+V` vía wtype (estándar de las apps consolidadas); NUNCA teclear carácter por carácter (wtype pierde puntuación/números). Fallback: pegado virtual UInput |
 | **Pausa MPRIS** | Pausa los reproductores con `playerctl -a pause` al grabar; reanuda al terminar (guard si playerctl falta) |
+| **Fallback STT robusto** | Si el proveedor principal falla por credenciales o red, cae automáticamente a Gemini o local Whisper |
+| **Diagnóstico (`doctor`)** | `theia-dictate doctor [--format json]` — audita credenciales ADC / RAPT, API keys, herramientas y daemon |
 
 ## Archivos del proyecto
 
@@ -59,7 +61,7 @@ sandboxing y haría el keystroke injection más difícil.
 
 ## Configuración
 
-Config en `~/.config/theia_dictate/config.json` (se crea automáticamente al primer uso):
+Config en `~/.config/theia-dictate/config.json` (se crea automáticamente al primer uso):
 - `language`: idioma para Whisper (ej. "es", "en", "pt"). Pasa al pre-loader vía `/tmp/theia-dictate-lang`.
 - `default_mode`: modo por defecto si no se pasa `--mode`.
 - `vocabulary`: lista de términos propios inyectados al prompt de Gemini (nombres, siglas, marcas).
