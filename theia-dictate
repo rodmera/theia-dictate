@@ -186,23 +186,13 @@ def read_state():
     except Exception:
         return "idle"
 
-    if st == "recording":
-        rpid = None
-        if os.path.exists(RECORDER_PID):
-            try:
-                with open(RECORDER_PID) as f:
-                    rpid = int(f.read().strip())
-            except Exception:
-                pass
-        if not rpid or not process_alive(rpid):
-            # Proceso grabador muerto -> auto-sanar a idle
-            debug_log("read_state: estado 'recording' rancio sin proceso activo -> auto-sanar a 'idle'")
+    # Con RingRecorder en daemon, la grabación corre dentro del hilo del daemon (daemon_pid).
+    # Solo auto-sanar si el DAEMON está muerto.
+    if st in ("recording", "transcribing"):
+        dpid = daemon_pid()
+        if not dpid or not daemon_alive(dpid):
+            debug_log(f"read_state: estado '{st}' rancio con daemon muerto -> auto-sanar a 'idle'")
             set_state("idle")
-            try:
-                if os.path.exists(RECORDER_PID):
-                    os.remove(RECORDER_PID)
-            except Exception:
-                pass
             return "idle"
 
     return st
