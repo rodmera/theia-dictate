@@ -44,6 +44,9 @@ _local_transcribe = _ns["_local_transcribe"]
 transcribe_audio = _ns["transcribe_audio"]
 audit_providers = _ns["audit_providers"]
 doctor_cmd = _ns["doctor_cmd"]
+read_state = _ns["read_state"]
+set_state = _ns["set_state"]
+process_alive = _ns["process_alive"]
 
 FRAME_SAMPLES = vad.FRAME_SAMPLES
 
@@ -260,39 +263,70 @@ class TestSttProviderFallback(unittest.TestCase):
 
 
 class TestTokenCachingAndServiceAccount(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp_dir = tempfile.mkdtemp()
+        self.tmp_cache_file = os.path.join(self.tmp_dir, "test-token-cache.json")
+        _ns["TOKEN_CACHE_FILE"] = self.tmp_cache_file
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
     def test_write_and_read_token_cache(self):
         import time
         token = "ya29.test_cached_token_12345"
         expires_at = time.time() + 3000
-        _write_token_cache(token, expires_at, source_id="test")
+        _write_token_cache(token, expires_at, source_id="test_src")
         
-        cached = _read_token_cache(source_id="test")
+        cached = _read_token_cache(source_id="test_src")
         self.assertEqual(cached, token)
+
+    def test_read_cache_requires_matching_source_id(self):
+        import time
+        token = "ya29.test_source_id_token"
+        expires_at = time.time() + 3000
+        _write_token_cache(token, expires_at, source_id="sa_path_1")
+
+        # source_id no coincide -> rechaza
+        self.assertIsNone(_read_token_cache(source_id="sa_path_2"))
+        # source_id nulo -> rechaza por seguridad
+        self.assertIsNone(_read_token_cache(source_id=None))
+        # source_id exacto -> acepta
+        self.assertEqual(_read_token_cache(source_id="sa_path_1"), token)
 
     def test_expired_token_cache_returns_none(self):
         import time
         token = "ya29.test_expired_token"
         expires_at = time.time() + 30  # Menos de 60s restantes
-        _write_token_cache(token, expires_at, source_id="test")
+        _write_token_cache(token, expires_at, source_id="test_src")
         
-        cached = _read_token_cache(source_id="test")
+        cached = _read_token_cache(source_id="test_src")
         self.assertIsNone(cached)
 
     def test_get_chirp_access_token_uses_cache_first(self):
         import time
-        from unittest.mock import patch
+        import tempfile
 
-        token = "ya29.cached_token_priority"
-        _write_token_cache(token, time.time() + 3000)
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json") as f:
+            _json.dump({"type": "service_account"}, f)
+            tmp_sa = f.name
 
-        # Sin importar si ADC o SA están rotos, debe resolver desde caché
-        at, err = _get_chirp_access_token(adc_path="/tmp/non_existent.json", use_cache=True)
-        self.assertEqual(at, token)
-        self.assertIsNone(err)
+        try:
+            token = "ya29.cached_token_priority"
+            _write_token_cache(token, time.time() + 3000, source_id=tmp_sa)
+
+            # Debe resolver desde caché con el source_id correcto
+            at, err = _get_chirp_access_token(sa_path=tmp_sa, adc_path="/tmp/non_existent.json", use_cache=True)
+            self.assertEqual(at, token)
+            self.assertIsNone(err)
+        finally:
+            if os.path.exists(tmp_sa):
+                os.remove(tmp_sa)
 
     def test_service_account_priority_over_adc(self):
         import time
-        from unittest.mock import patch, MagicMock
+        from unittest.mock import patch
         import tempfile
 
         with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json") as f:
@@ -310,6 +344,48 @@ class TestTokenCachingAndServiceAccount(unittest.TestCase):
         finally:
             if os.path.exists(tmp_sa):
                 os.remove(tmp_sa)
+
+
+class TestStaleStateHealing(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp_dir = tempfile.mkdtemp()
+        self.tmp_state_file = os.path.join(self.tmp_dir, "theia-dictate-state")
+        self.tmp_recorder_pid_file = os.path.join(self.tmp_dir, "theia-dictate-recorder.pid")
+        _ns["STATE_FILE"] = self.tmp_state_file
+        _ns["RECORDER_PID"] = self.tmp_recorder_pid_file
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp_dir, ignore_errors=True)
+
+    def test_read_state_heals_stale_recording_state_when_recorder_dead(self):
+        # Escribir estado 'recording' con un PID inexistente
+        with open(self.tmp_state_file, "w") as f:
+            f.write("recording")
+        with open(self.tmp_recorder_pid_file, "w") as f:
+            f.write("9999999")
+
+        # read_state debe auto-sanar a 'idle'
+        st = read_state()
+        self.assertEqual(st, "idle")
+
+        # Archivo de estado debe quedar como 'idle'
+        with open(self.tmp_state_file) as f:
+            self.assertEqual(f.read().strip(), "idle")
+
+        # Archivo RECORDER_PID debe ser limpiado
+        self.assertFalse(os.path.exists(self.tmp_recorder_pid_file))
+
+    def test_read_state_preserves_recording_state_when_recorder_alive(self):
+        # Escribir estado 'recording' con el PID actual (vivo)
+        with open(self.tmp_state_file, "w") as f:
+            f.write("recording")
+        with open(self.tmp_recorder_pid_file, "w") as f:
+            f.write(str(os.getpid()))
+
+        st = read_state()
+        self.assertEqual(st, "recording")
 
 
 class TestDoctorDiagnostics(unittest.TestCase):
