@@ -10,7 +10,7 @@ Dictado inteligente nativo de Linux (Wayland/Hyprland), homologado a los patrone
 - `arecord` (alsa-utils), `sox` (auto-stop por silencio), `wtype`, `wl-clipboard`
 - `playerctl` (opcional: pausa MPRIS al dictar)
 - Para el proveedor `local`: `faster-whisper` (instalado en `.venv`)
-- Para `chirp`: ADC de Google Cloud (`~/.config/gcloud/application_default_credentials_theia.json`) + proyecto con Speech API
+- Para `chirp`: Service Account Key en `~/.config/openclaw-secrets/chirp-sa-key.json` (recomendado e inmune a expiración RAPT) o credenciales OAuth ADC (`theia-dictate auth`)
 - `notify-send` (notificaciones de estado)
 
 ## Features
@@ -84,6 +84,14 @@ El daemon corre como servicio de usuario (`theia-dictate.service`) y se controla
 theia-dictate record start|stop|toggle|cancel
 theia-dictate status [--follow] [--format json]
 theia-dictate record start --mode vault     # guarda en Obsidian
+theia-dictate doctor                        # diagnostica SA, OAuth, Gemini y modelos locales
+theia-dictate auth                          # asistente interactivo OAuth one-click en navegador
 ```
+
+### Autenticación y Robustez de Chirp STT
+
+1. **Service Account (Recomendado):** Ubica `chirp-sa-key.json` en `~/.config/openclaw-secrets/`. Genera JWTs firmados localmente con Token Caching en disco (TTL 50m), eliminando latencia de handshake OAuth y siendo inmune a expiraciones de sesión `invalid_rapt`.
+2. **OAuth Interactivo:** Ejecuta `theia-dictate auth` para autorizar en el navegador con un solo clic vía loopback local seguro (`127.0.0.1:8085`).
+3. **Fallback en Cascada:** Ante fallos de token/red en Chirp, conmuta automáticamente a **Gemini Audio STT** o **faster-whisper** local sin interrumpir el flujo.
 
 Historial de transcripciones: `~/.openclaw/workspace/memory/theia-dictate-history.jsonl`.
