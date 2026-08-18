@@ -275,13 +275,25 @@ def main():
         # perdía los primeros ~200-500ms si el usuario hablaba al arrancar.
         stream = _iter_arecord_frames(cmd)
 
+    # Iniciar la captura de arecord INMEDIATAMENTE antes de cargar Silero/Torch
+    # para que el buffer del kernel ALSA empiece a capturar desde t=0 real de la tecla.
+    first_frames = []
+    first_raw = []
+    try:
+        f_int, f_bytes = next(stream)
+        first_frames.append(f_int)
+        first_raw.append(f_bytes)
+    except StopIteration:
+        pass
+
     # Silero por defecto: sin calibración de energía que pueda contaminarse si el
     # usuario habla al arrancar (causa raíz de la primera palabra perdida).
+    # Mientras Silero/Torch carga (~0.98s), arecord ya está capturando en background.
     detector = EnergyVad() if not args.use_silero else SileroVadBackend()
 
-    calib = []
-    calib_raw = []
-    for _ in range(15):
+    calib = list(first_frames)
+    calib_raw = list(first_raw)
+    for _ in range(max(0, 15 - len(first_frames))):
         try:
             frames, raw = next(stream)
         except StopIteration:

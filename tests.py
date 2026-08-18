@@ -47,6 +47,8 @@ doctor_cmd = _ns["doctor_cmd"]
 read_state = _ns["read_state"]
 set_state = _ns["set_state"]
 process_alive = _ns["process_alive"]
+insert_text = _ns["insert_text"]
+simulate_paste = _ns["simulate_paste"]
 
 FRAME_SAMPLES = vad.FRAME_SAMPLES
 
@@ -422,6 +424,29 @@ class TestDoctorDiagnostics(unittest.TestCase):
         finally:
             if os.path.exists(tmp_sa):
                 os.remove(tmp_sa)
+
+
+class TestInsertTextAndModifierRelease(unittest.TestCase):
+    def test_insert_text_invokes_wtype_with_explicit_modifier_release(self):
+        from unittest.mock import patch, MagicMock
+
+        mock_sub = MagicMock()
+        mock_sub.returncode = 0
+
+        with patch.dict(_ns, {
+            "_copy_to_clipboard": lambda text: True,
+        }), patch("shutil.which", return_value="/usr/bin/wtype"), patch("subprocess.run", return_value=mock_sub) as mock_run, patch("time.sleep"):
+            insert_text("prueba de texto pegado")
+            mock_run.assert_called_once()
+            args = mock_run.call_args[0][0]
+            self.assertEqual(args, ["wtype", "-M", "ctrl", "-M", "shift", "-k", "v", "-m", "shift", "-m", "ctrl"])
+
+    def test_insert_text_empty_returns_early(self):
+        from unittest.mock import patch
+
+        with patch("subprocess.run") as mock_run:
+            insert_text("")
+            mock_run.assert_not_called()
 
 
 if __name__ == "__main__":
