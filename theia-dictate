@@ -61,6 +61,11 @@ DEFAULT_CONFIG = {
     "stt_chirp_model": "chirp_3",
     "stt_chirp_region": "us",            # Chirp 3: multi-región "us"/"eu" (o europe-west2/3, asia-south1, northamerica-northeast1)
     "stt_chirp_project": "",             # project id de theia para X-Goog-User-Project
+    "audio_feedback": {
+        "enabled": True,
+        "volume": 0.5,
+        "theme": "subtle"
+    },
     "silence_timeout": None,
     "auto_stop": "silence",            # "silence" (sox, default) | "vad" (VAD suavizado)
     "vad_max_silence_ms": 1500,
@@ -449,6 +454,48 @@ def notify(msg, icon="audio-input-microphone", expire=2000):
     hyprctl (se ve horrible en pantalla).
     """
     subprocess.run(["notify-send", "-t", str(expire), "-i", icon, "TheIA Dictate", msg])
+
+
+def play_audio_feedback(event="start", config=None):
+    """Reproduce un feedback de audio no bloqueante (start/stop) en un hilo desacoplado."""
+    if config is None:
+        config = load_config()
+
+    af_cfg = config.get("audio_feedback", {})
+    if isinstance(af_cfg, bool):
+        af_cfg = {"enabled": af_cfg}
+    if not af_cfg.get("enabled", True):
+        return
+
+    def _play():
+        try:
+            sound_dir = "/usr/share/sounds/freedesktop/stereo"
+            sound_file = None
+            if event == "start":
+                cand = os.path.join(sound_dir, "audio-volume-change.oga")
+                if os.path.exists(cand):
+                    sound_file = cand
+            elif event == "stop":
+                cand = os.path.join(sound_dir, "dialog-information.oga")
+                if os.path.exists(cand):
+                    sound_file = cand
+                else:
+                    sound_file = os.path.join(sound_dir, "audio-volume-change.oga")
+
+            if sound_file and os.path.exists(sound_file):
+                if shutil.which("pw-play"):
+                    subprocess.run(["pw-play", sound_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                elif shutil.which("paplay"):
+                    subprocess.run(["paplay", sound_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                elif shutil.which("aplay"):
+                    subprocess.run(["aplay", "-q", sound_file], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif shutil.which("canberra-gtk-play"):
+                snd_id = "audio-volume-change" if event == "start" else "dialog-information"
+                subprocess.run(["canberra-gtk-play", "-i", snd_id], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as e:
+            debug_log(f"play_audio_feedback error: {e}")
+
+    threading.Thread(target=_play, daemon=True, name="AudioFeedbackThread").start()
 
 
 def simulate_paste():
@@ -1531,6 +1578,7 @@ def run_daemon():
             os.kill(os.getpid(), signal.SIGUSR2)
 
         set_state("recording")
+        play_audio_feedback("start", config=cfg)
         recorder.begin_recording(vad_instance=active_vad, on_vad_stop=handle_vad_autostop)
 
         # Pausar reproducción MPRIS
@@ -1562,6 +1610,7 @@ def run_daemon():
             set_state("idle")
             return
 
+        play_audio_feedback("stop", config=load_config())
         # Finalizar captura e inmediatamente escribir WAV
         raw_pcm = recorder.end_recording(AUDIO_FILE)
         if not raw_pcm:
@@ -1623,25 +1672,71 @@ def record_cmd(cmd, mode=None):
     return 0
 
 
-def status_cmd(follow=False, fmt="text"):
-    """Muestra el estado del daemon; --follow emite un stream JSON (bar de Omarchy)."""
+def format_status_json(state, alive=True, pid=None):
+    """Genera el JSON de estado compatible con el widget Dictation.qml de Omarchy."""
+    effective_state = state if alive else "stopped"
+
+    if effective_state == "recording":
+        return {
+            "alt": "recording",
+            "class": "recording",
+            "text": "󰍬",
+            "tooltip": "recording",
+            "state": "recording",
+            "pid": pid,
+        }
+    elif effective_state == "transcribing":
+        return {
+            "alt": "transcribing",
+            "class": "transcribing",
+            "text": "󰔟",
+            "tooltip": "transcribing",
+            "state": "transcribing",
+            "pid": pid,
+        }
+    elif effective_state == "stopped":
+        return {
+            "alt": "",
+            "class": "stopped",
+            "text": "",
+            "tooltip": "stopped",
+            "state": "stopped",
+            "pid": None,
+        }
+    else:  # idle
+        return {
+            "alt": "",
+            "class": "idle",
+            "text": "",
+            "tooltip": "idle",
+            "state": "idle",
+            "pid": pid,
+        }
+
+
+def status_cmd(follow=False, fmt="text", extended=False):
+    """Muestra el estado del daemon; --follow emite un stream JSON en tiempo real para la barra de Omarchy."""
     import time as _time
+    last_emitted_state = None
+
     while True:
-        state = read_state()
         pid = daemon_pid()
         alive = daemon_alive(pid)
+        state = read_state() if alive else "stopped"
+
         if fmt == "json":
-            print(json.dumps({"state": state if alive else "stopped",
-                              "pid": pid if alive else None}))
+            data = format_status_json(state, alive=alive, pid=pid)
+            if not follow or state != last_emitted_state:
+                print(json.dumps(data, separators=(',', ':')), flush=True)
+                last_emitted_state = state
         else:
-            if alive:
-                print(state)
-            else:
-                print("stopped")
+            if not follow or state != last_emitted_state:
+                print(state, flush=True)
+                last_emitted_state = state
+
         if not follow:
             return 0
-        sys.stdout.flush()
-        _time.sleep(1)
+        _time.sleep(0.15)
 
 
 def auth_cmd(port=8085, no_browser=False):
@@ -1996,6 +2091,7 @@ if __name__ == "__main__":
     p_status = sub.add_parser("status", help="Estado del daemon (idle|recording|transcribing)")
     p_status.add_argument("--follow", action="store_true", help="Stream continuo (JSON)")
     p_status.add_argument("--format", choices=["text", "json"], default="text")
+    p_status.add_argument("--extended", action="store_true", help="Compatibilidad con voxtype status")
 
     p_doctor = sub.add_parser("doctor", help="Auditoría y diagnóstico de proveedores y credenciales")
     p_doctor.add_argument("--format", choices=["text", "json"], default="text")
@@ -2019,7 +2115,7 @@ if __name__ == "__main__":
     if args.command == "record":
         sys.exit(record_cmd(args.action, mode=args.mode))
     if args.command == "status":
-        sys.exit(status_cmd(follow=args.follow, fmt=args.format))
+        sys.exit(status_cmd(follow=args.follow, fmt=args.format, extended=getattr(args, "extended", False)))
     if args.command in ("auth", "login"):
         sys.exit(auth_cmd(port=args.port, no_browser=args.no_browser))
     if args.command == "doctor" or args.doctor:

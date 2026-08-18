@@ -51,6 +51,8 @@ insert_text = _ns["insert_text"]
 simulate_paste = _ns["simulate_paste"]
 RingRecorder = _ns["RingRecorder"]
 _write_wav = _ns["_write_wav"]
+play_audio_feedback = _ns["play_audio_feedback"]
+format_status_json = _ns["format_status_json"]
 
 FRAME_SAMPLES = vad.FRAME_SAMPLES
 
@@ -588,6 +590,68 @@ class TestRingRecorderAndPreRoll(unittest.TestCase):
             rec.feed_frame(sample_frame, sample_bytes)
         audio2 = rec.end_recording(output_wav_path="/dev/null")
         self.assertEqual(len(audio2), 12 * 1024)
+
+
+class TestAudioFeedback(unittest.TestCase):
+    def test_play_audio_feedback_disabled_does_nothing(self):
+        from unittest.mock import patch
+
+        cfg = {"audio_feedback": {"enabled": False}}
+        with patch("subprocess.run") as mock_run:
+            play_audio_feedback("start", config=cfg)
+            mock_run.assert_not_called()
+
+    def test_play_audio_feedback_start_and_stop_dispatches_player(self):
+        from unittest.mock import patch, MagicMock
+        import time
+
+        cfg = {"audio_feedback": {"enabled": True}}
+        mock_sub = MagicMock()
+        mock_sub.returncode = 0
+
+        with patch("shutil.which", return_value="/usr/bin/pw-play"), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=mock_sub) as mock_run:
+            play_audio_feedback("start", config=cfg)
+            time.sleep(0.05)
+            mock_run.assert_called()
+
+        with patch("shutil.which", return_value="/usr/bin/pw-play"), \
+             patch("os.path.exists", return_value=True), \
+             patch("subprocess.run", return_value=mock_sub) as mock_run_stop:
+            play_audio_feedback("stop", config=cfg)
+            time.sleep(0.05)
+            mock_run_stop.assert_called()
+
+
+class TestOmarchyStatusJson(unittest.TestCase):
+    def test_format_status_json_recording(self):
+        d = format_status_json("recording", alive=True, pid=1234)
+        self.assertEqual(d["alt"], "recording")
+        self.assertEqual(d["class"], "recording")
+        self.assertEqual(d["tooltip"], "recording")
+        self.assertEqual(d["pid"], 1234)
+
+    def test_format_status_json_transcribing(self):
+        d = format_status_json("transcribing", alive=True, pid=1234)
+        self.assertEqual(d["alt"], "transcribing")
+        self.assertEqual(d["class"], "transcribing")
+        self.assertEqual(d["tooltip"], "transcribing")
+        self.assertEqual(d["pid"], 1234)
+
+    def test_format_status_json_idle(self):
+        d = format_status_json("idle", alive=True, pid=1234)
+        self.assertEqual(d["alt"], "")
+        self.assertEqual(d["class"], "idle")
+        self.assertEqual(d["tooltip"], "idle")
+        self.assertEqual(d["pid"], 1234)
+
+    def test_format_status_json_stopped(self):
+        d = format_status_json("idle", alive=False, pid=None)
+        self.assertEqual(d["alt"], "")
+        self.assertEqual(d["class"], "stopped")
+        self.assertEqual(d["tooltip"], "stopped")
+        self.assertIsNone(d["pid"])
 
 
 if __name__ == "__main__":
