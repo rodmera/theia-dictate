@@ -1079,24 +1079,21 @@ def transcribe_audio(audio_path, language="es", config=None):
 
 
 def stop_and_transcribe():
-    pid = None
-    for pf in (RECORDER_PID, PID_FILE):
+    # Solo detener grabador externo si existe RECORDER_PID (NUNCA matar el PID_FILE del daemon)
+    if os.path.exists(RECORDER_PID):
         try:
-            with open(pf, "r") as f:
-                pid = int(f.read().strip())
-            os.remove(pf)
-            break
+            with open(RECORDER_PID, "r") as f:
+                rpid = int(f.read().strip())
+            os.remove(RECORDER_PID)
+            if rpid and rpid != os.getpid():
+                try:
+                    os.kill(rpid, signal.SIGINT)
+                except ProcessLookupError:
+                    pass
         except Exception:
-            continue
+            pass
 
     set_state("transcribing")
-
-    if pid:
-        try:
-            os.kill(pid, 0)
-            os.kill(pid, signal.SIGINT)
-        except ProcessLookupError:
-            pass
 
     os.system("pkill -f 'preloader.py'")
     time.sleep(0.2)
