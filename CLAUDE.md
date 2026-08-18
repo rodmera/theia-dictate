@@ -47,6 +47,7 @@ sandboxing y haría el keystroke injection más difícil.
 | **Diagnóstico (`doctor`)** | `theia-dictate doctor [--format json]` — audita Service Account, credenciales ADC / RAPT, API keys, herramientas y daemon |
 | **Reautenticación One-Click (`auth`)** | `theia-dictate auth` (alias: `login`) — asistente OAuth 2.0 interactivo one-click en navegador con loopback local |
 | **Service Account & Token Caching** | Soporte para `chirp-sa-key.json` (inmune a RAPT) y caché de token en disco (50 min TTL) para baja latencia |
+| **RingRecorder & Pre-roll** | Captura continua en background con ringbuffer circular de 1.0s (mono 16kHz S16_LE) para latencia 0ms y captura de audio previo a la pulsación |
 
 ## Archivos del proyecto
 

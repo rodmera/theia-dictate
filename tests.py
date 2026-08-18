@@ -49,6 +49,8 @@ set_state = _ns["set_state"]
 process_alive = _ns["process_alive"]
 insert_text = _ns["insert_text"]
 simulate_paste = _ns["simulate_paste"]
+RingRecorder = _ns["RingRecorder"]
+_write_wav = _ns["_write_wav"]
 
 FRAME_SAMPLES = vad.FRAME_SAMPLES
 
@@ -447,6 +449,146 @@ class TestInsertTextAndModifierRelease(unittest.TestCase):
         with patch("subprocess.run") as mock_run:
             insert_text("")
             mock_run.assert_not_called()
+
+
+class TestRingRecorderAndPreRoll(unittest.TestCase):
+    def test_preroll_buffer_retains_audio_and_limits_to_window(self):
+        rec = RingRecorder(pre_roll_ms=1000)
+        # 1000ms a 32ms/frame = 31 frames máximo en buffer
+        self.assertEqual(rec.pre_roll_frames, 31)
+
+        # Inyectar 50 frames
+        sample_frame = [1000] * 512
+        sample_bytes = b"\x01\x02" * 512
+        for i in range(50):
+            rec.feed_frame(sample_frame, sample_bytes)
+
+        # El buffer no debe superar 31 frames
+        self.assertEqual(len(rec.pre_roll_buffer), 31)
+
+    def test_begin_recording_incorporates_preroll_audio(self):
+        import tempfile
+        rec = RingRecorder(pre_roll_ms=1000)
+
+        sample_frame = [2000] * 512
+        sample_bytes = b"\xaa\xbb" * 512
+
+        # 15 frames en pre-roll
+        for _ in range(15):
+            rec.feed_frame(sample_frame, sample_bytes)
+
+        # Iniciar grabación activa
+        rec.begin_recording()
+        self.assertTrue(rec.active)
+        # Los 15 frames deben haber pasado a recorded_bytes
+        self.assertEqual(len(rec.recorded_bytes), 15 * 1024)
+        # El buffer de pre-roll debe haberse vaciado
+        self.assertEqual(len(rec.pre_roll_buffer), 0)
+
+        # Grabar 10 frames más en caliente
+        for _ in range(10):
+            rec.feed_frame(sample_frame, sample_bytes)
+        self.assertEqual(len(rec.recorded_bytes), 25 * 1024)
+
+        with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".wav") as f:
+            tmp_wav = f.name
+
+        try:
+            raw_pcm = rec.end_recording(output_wav_path=tmp_wav)
+            self.assertFalse(rec.active)
+            self.assertEqual(len(raw_pcm), 25 * 1024)
+            self.assertTrue(os.path.exists(tmp_wav))
+            # Verificar tamaño de archivo WAV (44 bytes cabecera + datos)
+            self.assertEqual(os.path.getsize(tmp_wav), 44 + (25 * 1024))
+        finally:
+            if os.path.exists(tmp_wav):
+                os.remove(tmp_wav)
+
+    def test_cancel_recording_discards_audio(self):
+        rec = RingRecorder(pre_roll_ms=1000)
+        sample_frame = [3000] * 512
+        sample_bytes = b"\x11\x22" * 512
+
+        for _ in range(10):
+            rec.feed_frame(sample_frame, sample_bytes)
+
+        rec.begin_recording()
+        for _ in range(5):
+            rec.feed_frame(sample_frame, sample_bytes)
+
+        rec.cancel_recording()
+        self.assertFalse(rec.active)
+        self.assertEqual(len(rec.recorded_bytes), 0)
+
+    def test_vad_auto_stop_callback_triggers(self):
+        rec = RingRecorder(pre_roll_ms=1000)
+        
+        vad_stop_called = []
+        def on_stop():
+            vad_stop_called.append(True)
+
+        class MockVad:
+            def __init__(self):
+                self.calls = 0
+            def push(self, frame_ints, raw_bytes):
+                self.calls += 1
+                if self.calls >= 5:
+                    return True, raw_bytes  # done
+                return False, None
+
+        mock_vad = MockVad()
+        rec.begin_recording(vad_instance=mock_vad, on_vad_stop=on_stop)
+
+        sample_frame = [4000] * 512
+        sample_bytes = b"\x33\x44" * 512
+
+        for _ in range(6):
+            rec.feed_frame(sample_frame, sample_bytes)
+
+        self.assertTrue(len(vad_stop_called) > 0)
+
+    def test_write_wav_creates_valid_header(self):
+        import tempfile
+        import wave
+
+        pcm_data = b"\x00\x00" * 16000  # 1 segundo de silencio
+        with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".wav") as f:
+            tmp_wav = f.name
+
+        try:
+            ok = _write_wav(tmp_wav, pcm_data, sample_rate=16000, channels=1, sample_width=2)
+            self.assertTrue(ok)
+            with wave.open(tmp_wav, "rb") as w:
+                self.assertEqual(w.getnchannels(), 1)
+                self.assertEqual(w.getsampwidth(), 2)
+                self.assertEqual(w.getframerate(), 16000)
+                self.assertEqual(w.getnframes(), 16000)
+        finally:
+            if os.path.exists(tmp_wav):
+                os.remove(tmp_wav)
+
+    def test_ring_recorder_multistep_capture_flow(self):
+        rec = RingRecorder(pre_roll_ms=1000)
+        sample_frame = [500] * 512
+        sample_bytes = b"\x05\x05" * 512
+
+        # Ciclo 1: Pre-roll (10 frames) -> Grabar (5 frames) -> Finalizar
+        for _ in range(10):
+            rec.feed_frame(sample_frame, sample_bytes)
+        rec.begin_recording()
+        for _ in range(5):
+            rec.feed_frame(sample_frame, sample_bytes)
+        audio1 = rec.end_recording(output_wav_path="/dev/null")
+        self.assertEqual(len(audio1), 15 * 1024)
+
+        # Ciclo 2: Idle acumula nuevo pre-roll (8 frames) -> Grabar (4 frames) -> Finalizar
+        for _ in range(8):
+            rec.feed_frame(sample_frame, sample_bytes)
+        rec.begin_recording()
+        for _ in range(4):
+            rec.feed_frame(sample_frame, sample_bytes)
+        audio2 = rec.end_recording(output_wav_path="/dev/null")
+        self.assertEqual(len(audio2), 12 * 1024)
 
 
 if __name__ == "__main__":
