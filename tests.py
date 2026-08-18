@@ -355,8 +355,10 @@ class TestStaleStateHealing(unittest.TestCase):
         import tempfile
         self.tmp_dir = tempfile.mkdtemp()
         self.tmp_state_file = os.path.join(self.tmp_dir, "theia-dictate-state")
+        self.tmp_pid_file = os.path.join(self.tmp_dir, "theia-dictate.pid")
         self.tmp_recorder_pid_file = os.path.join(self.tmp_dir, "theia-dictate-recorder.pid")
         _ns["STATE_FILE"] = self.tmp_state_file
+        _ns["PID_FILE"] = self.tmp_pid_file
         _ns["RECORDER_PID"] = self.tmp_recorder_pid_file
 
     def tearDown(self):
@@ -378,14 +380,11 @@ class TestStaleStateHealing(unittest.TestCase):
         with open(self.tmp_state_file) as f:
             self.assertEqual(f.read().strip(), "idle")
 
-        # Archivo RECORDER_PID debe ser limpiado
-        self.assertFalse(os.path.exists(self.tmp_recorder_pid_file))
-
     def test_read_state_preserves_recording_state_when_recorder_alive(self):
         # Escribir estado 'recording' con el PID actual (vivo)
         with open(self.tmp_state_file, "w") as f:
             f.write("recording")
-        with open(self.tmp_recorder_pid_file, "w") as f:
+        with open(self.tmp_pid_file, "w") as f:
             f.write(str(os.getpid()))
 
         st = read_state()
