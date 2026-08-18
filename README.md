@@ -1,97 +1,69 @@
-# TheIA Dictate 🎙️🤖
+# TheIA Dictate 🎙️🤖 (v1.2.0)
 
-Dictado inteligente nativo de Linux (Wayland/Hyprland), homologado a los patrones de las apps de dictado consolidadas (Voxtype y similares): **push-to-talk nativo del compositor**, **auto-stop por VAD**, **notificaciones de escritorio estándar**, y **post-proceso por IA**.
+Dictado inteligente nativo de Linux (Wayland/Hyprland), homologado a los patrones de las apps de dictado consolidadas (Voxtype, Superwhisper, Wisp): **captura continua con RingBuffer en background (0ms de latencia de inicio / 1.0s pre-roll en RAM)**, **push-to-talk nativo del compositor**, **auto-stop por VAD**, **notificaciones de escritorio estándar**, y **post-proceso por IA**.
 
-1. **Transcripción:** captura con `arecord`, transcribe con el proveedor configurado — `local` (faster-whisper turbo, offline), `gemini` (gemini-3.7-flash) o `chirp` (Google Cloud STT, `chirp_3`).
-2. **Intención y post-proceso:** Gemini arregla errores fonéticos y respeta tu vocabulario, o parsea un comando activo (abrir proyecto, consultar el vault, agregar tarea Todoist, preguntarle a Sherlock).
-3. **Auto-typing:** copia al portapapeles y pega en el cursor (`Ctrl+Shift+V` vía wtype) — el estándar de las apps de dictado consolidadas; nunca teclea carácter por carácter (se pierden caracteres).
+---
 
-## Prerequisites
-- `arecord` (alsa-utils), `sox` (auto-stop por silencio), `wtype`, `wl-clipboard`
-- `playerctl` (opcional: pausa MPRIS al dictar)
-- Para el proveedor `local`: `faster-whisper` (instalado en `.venv`)
-- Para `chirp`: Service Account Key en `~/.config/openclaw-secrets/chirp-sa-key.json` (recomendado e inmune a expiración RAPT) o credenciales OAuth ADC (`theia-dictate auth`)
-- `notify-send` (notificaciones de estado)
+## ⚡ Novedades en v1.2.0
 
-## Features
-- **Push-to-talk nativo:** F9 para grabar mientras lo mantienes, soltar para transcribir (binding de Hyprland con `release = true`, igual que Voxtype). También hay toggle.
-- **Modes:** diferentes prompts por contexto — email, chat, formal, notes, o custom.
-- **Raw mode (`--mode raw`):** sin post-proceso, máxima velocidad.
-- **Vault mode (`--mode vault`):** guarda la transcripción como nota de Obsidian en vez de pegarla.
-- **Append (`--append`):** agrega al contenido del portapapeles en vez de reemplazarlo.
-- **Auto-stop por VAD:** `auto_stop: "vad"` — detección de actividad de voz con onset/hangover/prefill (`vad.py`), no corta en pausas breves ni arranca con ruido. Umbral de energía adaptativo (o silero-vad si está instalado).
-- **Blank transcription filter:** descarta silencios/ruido en vez de pegar basura.
-- **Post-process editable:** prompts configurables en `post_process` (multi-prompt).
-- **Custom Vocabulary:** tus términos (nombres, siglas, marcas) en el config.
-- **Comandos por voz:** *"Abre el proyecto CreaEfecto"*, *"Abre el vault"*, *"Busca en mis notas sobre TheIA"*, *"Recuérdame llamar a cliente mañana"*, *"Dile a Sherlock que revise mi correo"*.
-- **Notificaciones de estado:** `notify-send` estándar para escuchando/procesando/listo.
+- **Arquitectura RingRecorder (Latencia de inicio 0 ms):** El daemon mantiene el stream de `arecord` abierto permanentemente en background en un hilo dedicado con un búfer circular en RAM (1,0s de *pre-roll*). Elimina el retardo en frío de apertura del dispositivo ALSA/PipeWire (1,55s), garantizando que la primera palabra (*"Hola..."*) nunca se corte.
+- **Auto-stop por VAD protegido:** Gestión de estados y callbacks VAD desacoplados del ciclo de vida del daemon.
+- **Aislamiento de modificadores en pegado:** Liberación forzada y explícita de modificadores (`SUPER`, `CTRL`, `SHIFT`, `ALT`) antes de inyectar `Ctrl+V` para evitar colisiones con atajos globales de Hyprland/Obsidian.
+- **Diagnóstico y Logging Estructurado:** Logs con marcas de tiempo en milisegundos, PIDs y nombres de hilo para troubleshooting instantáneo en `/tmp/theia-dictate-debug.log`.
 
-## Architecture
+---
 
-```
-F9 (press) ──► arecord + VAD (vad.py)     F9 (release) / VAD auto-stop
-                  │                              │
-                  ▼                              ▼
-             graba audio ─────────────────► recorta WAV (corte por voz)
-                                                   │
-                                                   ▼
-                              stt_provider (local | gemini | chirp)
-                                                   │
-                                                   ▼
-                              post_process (Gemini: corrige + intención)
-                                                   │
-                              ┌────────────────────┴──────────────────┐
-                              ▼                                        ▼
-                         insert_text (wtype)              comando (vault/todo/sherlock)
-```
+## 🚀 Proveedores STT Soportados
 
-## Configuración
+1. **Google Gemini (Recomendado / Default):** Modelo `gemini-3.7-flash` vía Google AI Studio (sin costo). Transcripción directa en ~1,2s.
+2. **Google Cloud STT (Chirp 3):** Vía Service Account Key (`~/.config/openclaw-secrets/chirp-sa-key.json`, inmune a expiración RAPT) o credenciales OAuth ADC.
+3. **Local (Offline):** `faster-whisper` ejecutándose en GPU/CPU local.
 
-`~/.config/theia-dictate/config.json` (se crea con defaults al primer uso):
+---
 
-```json
-{
-  "language": "es",
-  "default_mode": "default",
-  "auto_stop": "vad",
-  "stt_provider": "chirp",
-  "post_process": { "enabled": true, "selected_prompt": "cleanup", "prompts": [...] },
-  "vad_max_silence_ms": 2000,
-  "vad_onset_ms": 120,
-  "vad_hangover_ms": 400,
-  "vad_prefill_ms": 240,
-  "modes": { "default": { "name": "Default", "prompt": "" }, "email": { ... }, ... }
-}
-```
+## ⌨️ Atajos de Teclado (Hyprland)
 
-## Bindings (Hyprland)
+Configurados en `~/.config/hypr/bindings.lua`:
 
-En `~/.config/hypr/bindings.lua`, igual que el `voxtype.lua` de Omarchy:
+| Atajo | Acción | Modo |
+|---|---|---|
+| `F9` | **Push-to-Talk (estilo Voxtype)** | Mantener presionado mientras hablas, soltar para transcribir y pegar. |
+| `SUPER + CTRL + G` | **Toggle Manos Libres** | Presionar una vez para iniciar grabación, presionar de nuevo o dejar que el VAD corte por silencio. |
+| `SUPER + CTRL + SHIFT + V` | **Modo Vault** | Graba y guarda directamente como nota formateada en Obsidian. |
+| `SUPER + CTRL + ESCAPE` | **Cancelar** | Descarta la grabación activa sin transcribir. |
 
-```lua
-o.bind("F9", "TheIA Dictate: grabar (push-to-talk)", "theia-dictate record start")
-o.bind("F9", "TheIA Dictate: transcribir (soltar)", "theia-dictate record stop", { release = true })
-o.bind("SUPER + CTRL + G", "TheIA Dictate: toggle", "theia-dictate record toggle")
-o.bind("SUPER + CTRL + ESCAPE", "TheIA Dictate: cancelar", "theia-dictate record cancel")
-o.bind("SUPER + CTRL + SHIFT + V", "TheIA Dictate: vault", "theia-dictate record start --mode vault")
-```
+---
 
-## Uso
+## 🔍 Troubleshooting y Diagnóstico
 
-El daemon corre como servicio de usuario (`theia-dictate.service`) y se controla por señales:
-
+### 1. Auditoría del Sistema
+Ejecuta el comando integrado para validar credenciales, providers y estado del daemon:
 ```bash
-theia-dictate record start|stop|toggle|cancel
-theia-dictate status [--follow] [--format json]
-theia-dictate record start --mode vault     # guarda en Obsidian
-theia-dictate doctor                        # diagnostica SA, OAuth, Gemini y modelos locales
-theia-dictate auth                          # asistente interactivo OAuth one-click en navegador
+theia-dictate doctor
 ```
 
-### Autenticación y Robustez de Chirp STT
+### 2. Inspección de Logs en Vivo
+La traza estructurada con milisegundos e hilos se registra en:
+```bash
+tail -f /tmp/theia-dictate-debug.log
+```
+Formato de traza:
+```text
+[HH:MM:SS.mmm] [PID:12345:RingRecorderReader] RingRecorder: grabación iniciada con pre-roll (31744 bytes)
+[HH:MM:SS.mmm] [PID:12345:MainThread] VAD auto-stop detectado en stream
+[HH:MM:SS.mmm] [PID:12345:MainThread] res.transcribe: provider=gemini text='Hola esto es una prueba'
+[HH:MM:SS.mmm] [PID:12345:MainThread] insert_text ejecutado (len=25)
+```
 
-1. **Service Account (Recomendado):** Ubica `chirp-sa-key.json` en `~/.config/openclaw-secrets/`. Genera JWTs firmados localmente con Token Caching en disco (TTL 50m), eliminando latencia de handshake OAuth y siendo inmune a expiraciones de sesión `invalid_rapt`.
-2. **OAuth Interactivo:** Ejecuta `theia-dictate auth` para autorizar en el navegador con un solo clic vía loopback local seguro (`127.0.0.1:8085`).
-3. **Fallback en Cascada:** Ante fallos de token/red en Chirp, conmuta automáticamente a **Gemini Audio STT** o **faster-whisper** local sin interrumpir el flujo.
+### 3. Historial de Transcripciones
+Las entradas raw y refinadas se guardan en:
+`~/.openclaw/workspace/memory/theia-dictate-history.jsonl`
 
-Historial de transcripciones: `~/.openclaw/workspace/memory/theia-dictate-history.jsonl`.
+---
+
+## 🧪 Pruebas Automatizadas
+
+Ejecutar la suite completa de 32 tests unitarios e integración:
+```bash
+python3 tests.py
+```

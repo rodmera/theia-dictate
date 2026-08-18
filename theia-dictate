@@ -34,12 +34,17 @@ CANCEL_FILE  = "/tmp/theia-dictate-cancel"
 MODE_REQUEST = "/tmp/theia-dictate-mode-request"
 DEBUG_FILE   = "/tmp/theia-dictate-debug.log"
 
+__version__ = "1.2.0"
+
 
 def debug_log(msg):
-    """Traza mínima del ciclo para diagnóstico (append-only)."""
+    """Traza estructurada con timestamp preciso (ms), PID y Thread para troubleshooting rápido."""
     try:
+        now_str = datetime.now().strftime('%H:%M:%S.%f')[:-3]
+        thread_name = threading.current_thread().name
+        pid = os.getpid()
         with open(DEBUG_FILE, "a", encoding="utf-8") as f:
-            f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
+            f.write(f"[{now_str}] [PID:{pid}:{thread_name}] {msg}\n")
     except Exception:
         pass
 HISTORY_FILE = os.path.expanduser("~/.openclaw/workspace/memory/theia-dictate-history.jsonl")
