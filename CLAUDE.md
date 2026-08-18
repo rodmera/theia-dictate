@@ -44,7 +44,9 @@ sandboxing y haría el keystroke injection más difícil.
 | **Inserción por portapapeles** | `insert_text()` copia con `wl-copy` y pega `Ctrl+Shift+V` vía wtype (estándar de las apps consolidadas); NUNCA teclear carácter por carácter (wtype pierde puntuación/números). Fallback: pegado virtual UInput |
 | **Pausa MPRIS** | Pausa los reproductores con `playerctl -a pause` al grabar; reanuda al terminar (guard si playerctl falta) |
 | **Fallback STT robusto** | Si el proveedor principal falla por credenciales o red, cae automáticamente a Gemini o local Whisper |
-| **Diagnóstico (`doctor`)** | `theia-dictate doctor [--format json]` — audita credenciales ADC / RAPT, API keys, herramientas y daemon |
+| **Diagnóstico (`doctor`)** | `theia-dictate doctor [--format json]` — audita Service Account, credenciales ADC / RAPT, API keys, herramientas y daemon |
+| **Reautenticación One-Click (`auth`)** | `theia-dictate auth` (alias: `login`) — asistente OAuth 2.0 interactivo one-click en navegador con loopback local |
+| **Service Account & Token Caching** | Soporte para `chirp-sa-key.json` (inmune a RAPT) y caché de token en disco (50 min TTL) para baja latencia |
 
 ## Archivos del proyecto
 

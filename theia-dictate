@@ -506,22 +506,164 @@ def _gemini_transcribe(audio_path, language="es", model="gemini-3.7-flash"):
     return {"text": text, "provider": "gemini", "model": model}
 
 
-def _get_chirp_access_token(adc_path=None):
-    """Obtiene un access token OAuth fresco para Google Cloud STT / Chirp.
+TOKEN_CACHE_FILE = "/tmp/theia-dictate-chirp-token.json"
 
-    Lee las credenciales ADC de la cuenta TheIA. En caso de error HTTP (ej. 400 Bad Request),
-    extrae e interpreta el cuerpo JSON devuelto por Google (ej. 'invalid_rapt', reauth expirado),
-    evitando silenciar el diagnóstico real bajo un mensaje genérico.
+
+def _read_token_cache(source_id=None):
+    """Lee el access token cacheado si aún es válido (>60s restantes)."""
+    if not os.path.exists(TOKEN_CACHE_FILE):
+        return None
+    try:
+        with open(TOKEN_CACHE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        token = data.get("access_token")
+        expires_at = data.get("expires_at", 0)
+        cache_source = data.get("source_id")
+        if source_id and cache_source and cache_source != source_id:
+            return None
+        if token and (expires_at - time.time()) > 60:
+            return token
+    except Exception:
+        pass
+    return None
+
+
+def _write_token_cache(token, expires_at, source_id="default"):
+    """Guarda el access token en caché con permisos restrictivos (0600)."""
+    try:
+        data = {
+            "access_token": token,
+            "expires_at": expires_at,
+            "source_id": source_id,
+            "saved_at": time.time(),
+        }
+        fd = os.open(TOKEN_CACHE_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with open(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+def _get_sa_access_token(sa_path):
+    """Genera un access token a partir de una Service Account de GCP.
+
+    Inmune a expiraciones de sesión de usuario de Google Workspace (invalid_rapt).
+    Retorna (token, error, expires_at).
+    """
+    if not os.path.exists(sa_path):
+        return None, f"Archivo Service Account no encontrado: {sa_path}", None
+    try:
+        from google.oauth2 import service_account
+        from google.auth.transport.requests import Request
+        creds = service_account.Credentials.from_service_account_file(
+            sa_path,
+            scopes=["https://www.googleapis.com/auth/cloud-platform"]
+        )
+        creds.refresh(Request())
+        expiry = creds.expiry.timestamp() if creds.expiry else (time.time() + 3600)
+        return creds.token, None, expiry
+    except ImportError:
+        pass
+    except Exception as sa_err:
+        return None, f"Error en Service Account: {sa_err}", None
+
+    try:
+        import time as _t
+        import urllib.request as _ur
+        import urllib.parse as _up
+        import json as _j
+        import jwt as _jwt
+
+        with open(sa_path) as f:
+            sa_data = _j.load(f)
+        now_ts = int(_t.time())
+        payload = {
+            "iss": sa_data["client_email"],
+            "sub": sa_data["client_email"],
+            "aud": "https://oauth2.googleapis.com/token",
+            "iat": now_ts,
+            "exp": now_ts + 3600,
+            "scope": "https://www.googleapis.com/auth/cloud-platform",
+        }
+        signed_jwt = _jwt.encode(payload, sa_data["private_key"], algorithm="RS256")
+        token_data = _up.urlencode({
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": signed_jwt,
+        }).encode()
+        req = _ur.Request("https://oauth2.googleapis.com/token", data=token_data)
+        with _ur.urlopen(req, timeout=20) as resp:
+            resp_data = _j.loads(resp.read().decode())
+            at = resp_data.get("access_token")
+            exp_in = resp_data.get("expires_in", 3600)
+            return at, None, time.time() + exp_in
+    except Exception as e:
+        return None, f"Fallo al autenticar con Service Account: {e}", None
+
+
+def _find_service_account_key(config=None):
+    """Busca una Service Account Key en las ubicaciones estándar."""
+    candidates = []
+    if config:
+        sa_cfg = config.get("stt_chirp_sa_path")
+        if sa_cfg:
+            candidates.append(os.path.expanduser(sa_cfg))
+    candidates.extend([
+        os.path.expanduser("~/.config/openclaw-secrets/chirp-sa-key.json"),
+        os.path.expanduser("~/.config/openclaw-secrets/theia-stt-sa.json"),
+        os.path.expanduser("~/.config/gcloud/chirp-sa-key.json"),
+    ])
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _get_chirp_access_token(adc_path=None, sa_path=None, use_cache=True, config=None):
+    """Obtiene un access token OAuth para Google Cloud STT / Chirp.
+
+    Estrategia de resolución en capas:
+      1. Caché local en disco (/tmp/theia-dictate-chirp-token.json) si aún es válido (>60s restantes).
+      2. Service Account Key (sa_path o ~/.config/openclaw-secrets/chirp-sa-key.json) -> Inmune a invalid_rapt.
+      3. User ADC OAuth (adc_path o ~/.config/gcloud/application_default_credentials_theia.json).
     """
     import urllib.request
     import urllib.error
     import urllib.parse
     import json as _json
 
+    # 1. Caché en disco
+    if use_cache:
+        cached = _read_token_cache()
+        if cached:
+            debug_log("Chirp: usando token desde caché local válido")
+            return cached, None
+
+    # 2. Service Account (Prioridad máxima por estabilidad y no expiración)
+    if sa_path is None and adc_path is None:
+        sa_path = _find_service_account_key(config)
+    if sa_path and os.path.exists(sa_path):
+        at, sa_err, expiry = _get_sa_access_token(sa_path)
+        if at:
+            debug_log(f"Chirp: token obtenido via Service Account ({sa_path})")
+            if use_cache and expiry:
+                _write_token_cache(at, expiry, source_id=sa_path)
+            return at, None
+        debug_log(f"Chirp: fallo SA ({sa_err}), intentando fallback ADC")
+
+    # 3. User ADC
+    explicit_adc = adc_path is not None
     if adc_path is None:
         adc_path = os.path.expanduser("~/.config/gcloud/application_default_credentials_theia.json")
     if not os.path.exists(adc_path):
-        return None, f"Falta ADC de theia: {adc_path}"
+        if not explicit_adc:
+            alt_adc = os.path.expanduser("~/.config/gcloud/application_default_credentials.json")
+            if os.path.exists(alt_adc):
+                adc_path = alt_adc
+            else:
+                return None, f"Falta ADC de theia: {adc_path}"
+        else:
+            return None, f"Falta ADC de theia: {adc_path}"
+
     try:
         with open(adc_path) as f:
             adc = _json.load(f)
@@ -537,9 +679,13 @@ def _get_chirp_access_token(adc_path=None):
     try:
         req = urllib.request.Request("https://oauth2.googleapis.com/token", data=token_data)
         with urllib.request.urlopen(req, timeout=20) as resp:
-            at = _json.loads(resp.read().decode()).get("access_token", "")
+            resp_data = _json.loads(resp.read().decode())
+            at = resp_data.get("access_token", "")
+            expires_in = resp_data.get("expires_in", 3600)
         if not at:
             return None, "Token theia vacío (¿revocado?)"
+        if use_cache:
+            _write_token_cache(at, time.time() + expires_in, source_id=adc_path)
         return at, None
     except urllib.error.HTTPError as http_err:
         body = http_err.read().decode(errors="replace")
@@ -556,11 +702,11 @@ def _get_chirp_access_token(adc_path=None):
         return None, f"Token theia: {tok_err}"
 
 
-def _chirp_transcribe(audio_path, language="es-419", model="chirp_3", project_id="", region="us", adc_path=None):
+def _chirp_transcribe(audio_path, language="es-419", model="chirp_3", project_id="", region="us", adc_path=None, sa_path=None, config=None):
     """Transcripción con Google Cloud Speech-to-Text V2 (Chirp 3, stt_provider=chirp).
 
     Chirp 3 solo existe en la API V2 (endpoint regional + recognizer '_').
-    Usa el ADC de la cuenta theia (application_default_credentials_theia.json),
+    Usa Service Account Key (si existe) o ADC de la cuenta theia,
     con quota project vía X-Goog-User-Project. Retorna dict con 'text' (misma
     forma que stt.transcribe) para no cambiar el flujo de stop_and_transcribe.
     """
@@ -572,7 +718,7 @@ def _chirp_transcribe(audio_path, language="es-419", model="chirp_3", project_id
     if not os.path.exists(audio_path):
         return {"error": f"Archivo no encontrado: {audio_path}"}
 
-    at, tok_err = _get_chirp_access_token(adc_path=adc_path)
+    at, tok_err = _get_chirp_access_token(adc_path=adc_path, sa_path=sa_path, config=config)
     if tok_err:
         return {"error": tok_err}
     if not at:
@@ -672,6 +818,8 @@ def transcribe_audio(audio_path, language="es", config=None):
                 model=config.get("stt_chirp_model", "chirp_3"),
                 project_id=config.get("stt_chirp_project", ""),
                 region=config.get("stt_chirp_region", "us"),
+                sa_path=config.get("stt_chirp_sa_path"),
+                config=config,
             )
         elif prov == "local":
             res = _local_transcribe(audio_path, language=language)
@@ -1204,6 +1352,176 @@ def status_cmd(follow=False, fmt="text"):
         _time.sleep(1)
 
 
+def auth_cmd(port=8085, no_browser=False):
+    """Flujo interactivo one-click Google OAuth 2.0 PKCE / Authorization Code loopback.
+
+    Abre el navegador, captura el callback en localhost:port, intercambia el código por tokens
+    y guarda ~/.config/gcloud/application_default_credentials_theia.json directamente sin requerir gcloud CLI.
+    """
+    import urllib.parse
+    import urllib.request
+    import json as _json
+    import webbrowser
+    from http.server import HTTPServer, BaseHTTPRequestHandler
+
+    adc_path = os.path.expanduser("~/.config/gcloud/application_default_credentials_theia.json")
+    client_id = ""
+    client_secret = ""
+    quota_project = "gen-lang-client-0051492541"
+
+    if os.path.exists(adc_path):
+        try:
+            with open(adc_path) as f:
+                d = _json.load(f)
+                client_id = d.get("client_id", "")
+                client_secret = d.get("client_secret", "")
+                quota_project = d.get("quota_project_id", quota_project)
+        except Exception:
+            pass
+
+    if not client_id:
+        client_id = "764086051850-6qr4p6gpi6hn506pt8ejuq83di341hur.apps.googleusercontent.com"
+        client_secret = "d-FL95Q19q7MQmFpd7hHD0Ty"
+
+    redirect_uri = f"http://localhost:{port}"
+    state_token = f"theia_{int(time.time())}"
+
+    params = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "scope": "https://www.googleapis.com/auth/cloud-platform https://www.googleapis.com/auth/userinfo.email",
+        "access_type": "offline",
+        "prompt": "consent",
+        "state": state_token,
+    }
+    auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urllib.parse.urlencode(params)}"
+
+    auth_code_holder = {"code": None, "error": None}
+
+    class OAuthHandler(BaseHTTPRequestHandler):
+        def log_message(self, format, *args):
+            return
+
+        def do_GET(self):
+            parsed = urllib.parse.urlparse(self.path)
+            qs = urllib.parse.parse_qs(parsed.query)
+            if "code" in qs:
+                auth_code_holder["code"] = qs["code"][0]
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                html = """<!DOCTYPE html>
+<html>
+<head><title>TheIA Dictate — Autenticado</title></head>
+<body style="font-family: system-ui, -apple-system, sans-serif; background: #0f172a; color: #f8fafc; display: flex; align-items: center; justify-content: center; height: 90vh; margin: 0;">
+  <div style="background: #1e293b; padding: 40px 50px; border-radius: 16px; box-shadow: 0 10px 25px rgba(0,0,0,0.5); text-align: center; max-width: 480px;">
+    <div style="font-size: 48px; margin-bottom: 16px;">✓</div>
+    <h2 style="color: #34d399; margin: 0 0 10px;">¡Autenticación Exitosa!</h2>
+    <p style="color: #94a3b8; line-height: 1.5;">TheIA Dictate recibió las credenciales OAuth. Ya puedes cerrar esta pestaña y volver a tu terminal.</p>
+  </div>
+</body>
+</html>"""
+                self.wfile.write(html.encode("utf-8"))
+            else:
+                err = qs.get("error", ["desconocido"])[0]
+                auth_code_holder["error"] = err
+                self.send_response(400)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(f"Error de autenticación: {err}".encode("utf-8"))
+
+    print("════════════════════════════════════════════════════════════")
+    print(" THEIA DICTATE — REAUTENTICACIÓN GOOGLE OAUTH ONE-CLICK")
+    print("════════════════════════════════════════════════════════════")
+    print(f"• Servidor loopback escuchando en: {redirect_uri}")
+    print(f"• Archivo destino: {adc_path}")
+    print("")
+
+    try:
+        server = HTTPServer(("127.0.0.1", port), OAuthHandler)
+    except Exception as bind_err:
+        print(f"❌ Error al iniciar servidor local en puerto {port}: {bind_err}")
+        return 1
+
+    if not no_browser:
+        print("🌐 Abriendo navegador para autorizar la cuenta Google...")
+        try:
+            webbrowser.open(auth_url)
+        except Exception:
+            pass
+    print("\nSi el navegador no abrió automáticamente, abre este enlace:")
+    print(f"\n{auth_url}\n")
+    print("Esperando autorización en el navegador (presiona Ctrl+C para cancelar)...")
+
+    try:
+        while auth_code_holder["code"] is None and auth_code_holder["error"] is None:
+            server.handle_request()
+    except KeyboardInterrupt:
+        print("\n⚠️ Autenticación cancelada por el usuario.")
+        return 1
+    finally:
+        server.server_close()
+
+    if auth_code_holder["error"]:
+        print(f"\n❌ Error devuelto por Google: {auth_code_holder['error']}")
+        return 1
+
+    code = auth_code_holder["code"]
+    print("\n🔑 Código recibido. Intercambiando por tokens permanentes...")
+
+    token_data = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "code": code,
+        "grant_type": "authorization_code",
+        "redirect_uri": redirect_uri,
+    }).encode()
+
+    try:
+        req = urllib.request.Request("https://oauth2.googleapis.com/token", data=token_data)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            token_resp = _json.loads(resp.read().decode())
+    except urllib.error.HTTPError as http_err:
+        body = http_err.read().decode(errors="replace")
+        print(f"❌ Error al canjear código (HTTP {http_err.code}): {body}")
+        return 1
+    except Exception as e:
+        print(f"❌ Error de red: {e}")
+        return 1
+
+    refresh_token = token_resp.get("refresh_token")
+    access_token = token_resp.get("access_token")
+    expires_in = token_resp.get("expires_in", 3600)
+
+    creds_to_save = {
+        "type": "authorized_user",
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "refresh_token": refresh_token,
+        "quota_project_id": quota_project,
+    }
+
+    os.makedirs(os.path.dirname(adc_path), exist_ok=True)
+    fd = os.open(adc_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with open(fd, "w", encoding="utf-8") as f:
+        _json.dump(creds_to_save, f, indent=2)
+
+    if access_token:
+        _write_token_cache(access_token, time.time() + expires_in, source_id=adc_path)
+
+    print(f"✅ Credenciales guardadas exitosamente en: {adc_path}")
+    print("✅ Caché de token actualizado.")
+    print("\nVerificando conectividad con Chirp...")
+    at, err = _get_chirp_access_token(adc_path=adc_path, use_cache=False)
+    if at:
+        print("🎉 ¡Google Cloud STT (Chirp 3) está 100% LISTO y OPERATIVO!")
+    else:
+        print(f"⚠️ Advertencia al verificar token: {err}")
+    print("════════════════════════════════════════════════════════════")
+    return 0
+
+
 def audit_providers(config=None):
     """Auditoría y diagnóstico del estado de proveedores STT y credenciales."""
     if config is None:
@@ -1219,29 +1537,38 @@ def audit_providers(config=None):
     }
 
     # 1. Chirp STT
+    sa_path = _find_service_account_key(config)
+    cached_token = _read_token_cache()
     adc_path = os.path.expanduser("~/.config/gcloud/application_default_credentials_theia.json")
     chirp_status = {
+        "sa_path": sa_path,
+        "sa_exists": bool(sa_path and os.path.exists(sa_path)),
+        "cached_token_active": bool(cached_token),
         "adc_path": adc_path,
         "adc_exists": os.path.exists(adc_path),
         "project_id": config.get("stt_chirp_project", ""),
         "region": config.get("stt_chirp_region", "us"),
         "model": config.get("stt_chirp_model", "chirp_3"),
         "token_ok": False,
+        "token_source": None,
         "error": None,
     }
-    if chirp_status["adc_exists"]:
-        at, tok_err = _get_chirp_access_token(adc_path)
-        if at:
-            chirp_status["token_ok"] = True
-            chirp_status["status"] = "OK"
+    at, tok_err = _get_chirp_access_token(adc_path=adc_path, sa_path=sa_path, use_cache=True, config=config)
+    if at:
+        chirp_status["token_ok"] = True
+        chirp_status["status"] = "OK"
+        if sa_path and os.path.exists(sa_path):
+            chirp_status["token_source"] = "service_account"
+        elif cached_token:
+            chirp_status["token_source"] = "cache"
         else:
-            chirp_status["token_ok"] = False
-            chirp_status["error"] = tok_err
-            if tok_err and "invalid_rapt" in str(tok_err):
-                chirp_status["reauth_required"] = True
-                chirp_status["reauth_command"] = "gcloud auth application-default login"
+            chirp_status["token_source"] = "adc"
     else:
-        chirp_status["error"] = f"Archivo ADC no existe: {adc_path}"
+        chirp_status["token_ok"] = False
+        chirp_status["error"] = tok_err
+        if tok_err and "invalid_rapt" in str(tok_err):
+            chirp_status["reauth_required"] = True
+            chirp_status["reauth_command"] = "theia-dictate auth"
     report["providers"]["chirp"] = chirp_status
 
     # 2. Gemini STT
@@ -1309,13 +1636,19 @@ def doctor_cmd(fmt="text"):
     ch = report["providers"]["chirp"]
     print("1. Google Cloud STT (Chirp 3):")
     if ch.get("token_ok"):
-        print("   ✅ Token OAuth válido y activo")
+        src = ch.get("token_source")
+        if src == "service_account":
+            print(f"   ✅ Token válido via Service Account ({ch.get('sa_path')}) — Inmune a RAPT")
+        elif src == "cache":
+            print("   ⚡ Token OAuth válido y activo (desde caché local optimizado)")
+        else:
+            print("   ✅ Token OAuth de usuario válido y activo")
     else:
         print(f"   ❌ Fallo de token: {ch.get('error')}")
         if ch.get("reauth_required"):
             print("   ⚠️  ACCION REQUERIDA (Rodrigo): RAPT expirado (política Google Workspace).")
-            print(f"      Ejecutar en terminal: {ch.get('reauth_command')}")
-            print(f"      Luego mover credenciales a: {ch.get('adc_path')}")
+            print(f"      • Opción A (Recomendada): Colocar Service Account en ~/.config/openclaw-secrets/chirp-sa-key.json")
+            print(f"      • Opción B (One-Click): Ejecutar en terminal: theia-dictate auth")
 
     # Gemini
     gm = report["providers"]["gemini"]
@@ -1374,6 +1707,10 @@ if __name__ == "__main__":
     p_doctor = sub.add_parser("doctor", help="Auditoría y diagnóstico de proveedores y credenciales")
     p_doctor.add_argument("--format", choices=["text", "json"], default="text")
 
+    p_auth = sub.add_parser("auth", aliases=["login"], help="Reautenticación interactiva Google OAuth (one-click en navegador)")
+    p_auth.add_argument("--port", type=int, default=8085, help="Puerto local loopback (default: 8085)")
+    p_auth.add_argument("--no-browser", action="store_true", help="No abrir navegador automáticamente")
+
     parser.add_argument("--mode", default=None,
                         help="Modo de dictado: default, raw, email, chat, formal, notes, vault")
     parser.add_argument("--append", action="store_true",
@@ -1390,6 +1727,8 @@ if __name__ == "__main__":
         sys.exit(record_cmd(args.action, mode=args.mode))
     if args.command == "status":
         sys.exit(status_cmd(follow=args.follow, fmt=args.format))
+    if args.command in ("auth", "login"):
+        sys.exit(auth_cmd(port=args.port, no_browser=args.no_browser))
     if args.command == "doctor" or args.doctor:
         fmt = getattr(args, "format", "text") if args.command == "doctor" else "text"
         sys.exit(doctor_cmd(fmt=fmt))

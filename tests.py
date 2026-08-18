@@ -34,6 +34,10 @@ exec(compile(_main_split, "theia-dictate", "exec"), _ns)
 is_blank_transcription = _ns["is_blank_transcription"]
 auto_detect_language = _ns["auto_detect_language"]
 _get_chirp_access_token = _ns["_get_chirp_access_token"]
+_get_sa_access_token = _ns["_get_sa_access_token"]
+_read_token_cache = _ns["_read_token_cache"]
+_write_token_cache = _ns["_write_token_cache"]
+_find_service_account_key = _ns["_find_service_account_key"]
 _chirp_transcribe = _ns["_chirp_transcribe"]
 _gemini_transcribe = _ns["_gemini_transcribe"]
 _local_transcribe = _ns["_local_transcribe"]
@@ -159,7 +163,7 @@ class TestChirpTokenRefreshAndErrors(unittest.TestCase):
             )
 
             with patch("urllib.request.urlopen", side_effect=http_err):
-                at, err = _get_chirp_access_token(adc_path=tmp_adc)
+                at, err = _get_chirp_access_token(adc_path=tmp_adc, use_cache=False)
                 self.assertIsNone(at)
                 self.assertIsNotNone(err)
                 self.assertIn("invalid_rapt", err)
@@ -170,7 +174,7 @@ class TestChirpTokenRefreshAndErrors(unittest.TestCase):
                 os.remove(tmp_adc)
 
     def test_missing_adc_file_returns_error(self):
-        at, err = _get_chirp_access_token(adc_path="/tmp/non_existent_adc_file_12345.json")
+        at, err = _get_chirp_access_token(adc_path="/tmp/non_existent_adc_file_12345.json", use_cache=False)
         self.assertIsNone(at)
         self.assertIn("Falta ADC", err)
 
@@ -192,7 +196,7 @@ class TestChirpTokenRefreshAndErrors(unittest.TestCase):
             mock_resp.__enter__.return_value = mock_resp
 
             with patch("urllib.request.urlopen", return_value=mock_resp):
-                at, err = _get_chirp_access_token(adc_path=tmp_adc)
+                at, err = _get_chirp_access_token(adc_path=tmp_adc, use_cache=False)
                 self.assertEqual(at, "ya29.test_valid_token_123")
                 self.assertIsNone(err)
         finally:
@@ -255,19 +259,93 @@ class TestSttProviderFallback(unittest.TestCase):
             self.assertEqual(len(res.get("failed_attempts", [])), 3)
 
 
+class TestTokenCachingAndServiceAccount(unittest.TestCase):
+    def test_write_and_read_token_cache(self):
+        import time
+        token = "ya29.test_cached_token_12345"
+        expires_at = time.time() + 3000
+        _write_token_cache(token, expires_at, source_id="test")
+        
+        cached = _read_token_cache(source_id="test")
+        self.assertEqual(cached, token)
+
+    def test_expired_token_cache_returns_none(self):
+        import time
+        token = "ya29.test_expired_token"
+        expires_at = time.time() + 30  # Menos de 60s restantes
+        _write_token_cache(token, expires_at, source_id="test")
+        
+        cached = _read_token_cache(source_id="test")
+        self.assertIsNone(cached)
+
+    def test_get_chirp_access_token_uses_cache_first(self):
+        import time
+        from unittest.mock import patch
+
+        token = "ya29.cached_token_priority"
+        _write_token_cache(token, time.time() + 3000)
+
+        # Sin importar si ADC o SA están rotos, debe resolver desde caché
+        at, err = _get_chirp_access_token(adc_path="/tmp/non_existent.json", use_cache=True)
+        self.assertEqual(at, token)
+        self.assertIsNone(err)
+
+    def test_service_account_priority_over_adc(self):
+        import time
+        from unittest.mock import patch, MagicMock
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json") as f:
+            _json.dump({"type": "service_account"}, f)
+            tmp_sa = f.name
+
+        try:
+            with patch.dict(_ns, {
+                "_read_token_cache": lambda *a, **k: None,
+                "_get_sa_access_token": lambda path: ("ya29.sa_token_ok", None, time.time() + 3600),
+            }):
+                at, err = _get_chirp_access_token(sa_path=tmp_sa, adc_path="/tmp/fake_adc.json", use_cache=False)
+                self.assertEqual(at, "ya29.sa_token_ok")
+                self.assertIsNone(err)
+        finally:
+            if os.path.exists(tmp_sa):
+                os.remove(tmp_sa)
+
+
 class TestDoctorDiagnostics(unittest.TestCase):
     def test_audit_providers_identifies_invalid_rapt(self):
         from unittest.mock import patch
 
         with patch.dict(_ns, {
-            "_get_chirp_access_token": lambda adc_path=None: (None, "Token theia HTTP 400: reauth related error (invalid_rapt)"),
+            "_get_chirp_access_token": lambda *a, **k: (None, "Token theia HTTP 400: reauth related error (invalid_rapt)"),
         }):
             report = _ns["audit_providers"]()
             self.assertIn("providers", report)
             chirp_rep = report["providers"].get("chirp", {})
             self.assertFalse(chirp_rep.get("token_ok"))
             self.assertTrue(chirp_rep.get("reauth_required"))
-            self.assertIn("gcloud auth application-default login", chirp_rep.get("reauth_command", ""))
+            self.assertIn("theia-dictate auth", chirp_rep.get("reauth_command", ""))
+
+    def test_audit_providers_identifies_service_account(self):
+        from unittest.mock import patch
+        import tempfile
+
+        with tempfile.NamedTemporaryFile("w", delete=False, suffix=".json") as f:
+            _json.dump({"type": "service_account"}, f)
+            tmp_sa = f.name
+
+        try:
+            with patch.dict(_ns, {
+                "_find_service_account_key": lambda *a, **k: tmp_sa,
+                "_get_chirp_access_token": lambda *a, **k: ("ya29.sa_token", None),
+            }):
+                report = _ns["audit_providers"]()
+                chirp_rep = report["providers"].get("chirp", {})
+                self.assertTrue(chirp_rep.get("token_ok"))
+                self.assertEqual(chirp_rep.get("token_source"), "service_account")
+        finally:
+            if os.path.exists(tmp_sa):
+                os.remove(tmp_sa)
 
 
 if __name__ == "__main__":
