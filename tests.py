@@ -364,13 +364,13 @@ class TestStaleStateHealing(unittest.TestCase):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def test_read_state_heals_stale_recording_state_when_recorder_dead(self):
-        # Escribir estado 'recording' con un PID inexistente
+        # Escribir estado 'recording' con daemon inexistente
         with open(self.tmp_state_file, "w") as f:
             f.write("recording")
-        with open(self.tmp_recorder_pid_file, "w") as f:
+        with open(self.tmp_pid_file, "w") as f:
             f.write("9999999")
 
-        # read_state debe auto-sanar a 'idle'
+        # read_state debe auto-sanar a 'idle' cuando el daemon no existe
         st = read_state()
         self.assertEqual(st, "idle")
 
