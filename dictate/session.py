@@ -121,8 +121,7 @@ class NotesSessionManager:
             # 1. Transcripción
             t_fn = transcribe_fn
             if t_fn is None:
-                # Import dinámico del transcriptor
-                from theia_dictate_module import transcribe_audio
+                from dictate.stt import transcribe_audio
                 t_fn = lambda path, lang: transcribe_audio(path, language=lang, config=self.config)
 
             res_transcribe = t_fn(self.state.audio_path, self.state.language)
