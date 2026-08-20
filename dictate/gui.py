@@ -385,10 +385,15 @@ class TheIANotesWindow(Gtk.ApplicationWindow):
 
     def _on_save_vault_clicked(self, _btn: Gtk.Button) -> None:
         note_to_save = self._collect_edited_note()
+        if not note_to_save.title:
+            note_to_save.title = f"Minuta {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            self.entry_title.set_text(note_to_save.title)
+
         res = self.session_mgr.save_note_to_vault(note_to_save)
         if res.get("status") == "ok":
-            self.lbl_status.set_text(f"✅ Nota guardada en Obsidian Vault: {res.get('title')}")
-            self.lbl_header_status.set_text("Guardado en Vault")
+            self.btn_save_vault.set_sensitive(False)
+            self.lbl_status.set_text(f"✅ Guardado en Obsidian Vault: {res.get('title')}")
+            self.lbl_header_status.set_text("✅ Guardado en Vault")
         else:
             self.lbl_status.set_text(f"❌ Error al guardar en Vault: {res.get('error')}")
 
@@ -400,15 +405,28 @@ class TheIANotesWindow(Gtk.ApplicationWindow):
         self.lbl_status.set_text("📋 Markdown copiado al portapapeles.")
 
     def _on_discard_clicked(self, _btn: Gtk.Button) -> None:
+        """Descarta la sesión y limpia todos los campos del editor y notas manuales."""
         self.session_mgr.discard_session()
+        self.current_note = None
+
+        # Limpiar notas manuales y campos del editor
+        self.txt_manual_notes.get_buffer().set_text("")
         self.entry_title.set_text("")
+        self.entry_tags.set_text("unique, voice-note, reunion")
         self.txt_summary.get_buffer().set_text("")
         self.txt_key_points.get_buffer().set_text("")
         self.txt_decisions.get_buffer().set_text("")
         self.txt_action_items.get_buffer().set_text("")
         self.txt_transcript.get_buffer().set_text("")
-        self.lbl_header_status.set_text("Nota descartada")
-        self.lbl_status.set_text("Nota descartada del editor.")
+
+        # Desactivar botones de acción hasta nueva generación
+        self.btn_save_vault.set_sensitive(False)
+        self.btn_copy.set_sensitive(False)
+        self.btn_discard.set_sensitive(False)
+
+        self.lbl_timer.set_text("00:00")
+        self.lbl_header_status.set_text("Listo para grabar")
+        self.lbl_status.set_text("Nota descartada. Lienzo limpio listo para una nueva sesión.")
 
 
 class TheIANotesApp(Gtk.Application):
