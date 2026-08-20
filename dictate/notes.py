@@ -165,7 +165,10 @@ def process_vault_note(
             return {"status": "error", "error": f"No se pudo importar capture_note: {e}"}
 
     try:
-        fn(full_title, body_md, tags=note.tags, topic=note.topic)
+        fm_extra = {"topic": note.topic} if note.topic else {}
+        res = fn(full_title, body_md, tags=note.tags, frontmatter_extra=fm_extra, source="theia-notes")
+        if isinstance(res, dict) and res.get("error"):
+            return {"status": "error", "error": res["error"]}
         if recording_id:
             PROCESSED_RECORDINGS_SET.add(recording_id)
         return {
@@ -174,6 +177,8 @@ def process_vault_note(
             "topic": note.topic,
             "tags": note.tags,
             "recording_id": recording_id,
+            "path": res.get("path") if isinstance(res, dict) else None,
+            "uri": res.get("uri") if isinstance(res, dict) else None,
         }
     except Exception as exc:
         return {"status": "error", "error": str(exc)}

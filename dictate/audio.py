@@ -7,6 +7,7 @@ la latencia de inicio y evitar la pérdida de la primera sílaba.
 from collections import deque
 from dataclasses import dataclass
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -14,6 +15,46 @@ import threading
 import time
 from typing import Any, Callable, Protocol, runtime_checkable
 import uuid
+
+
+def get_pipewire_default_devices() -> dict[str, str]:
+    """Obtiene los nombres amigables de los dispositivos predeterminados de PipeWire."""
+    res = {
+        "default_source": "Micrófono predeterminado",
+        "default_sink": "Altavoces / Audio PC predeterminado",
+    }
+    if not shutil.which("wpctl"):
+        return res
+
+    try:
+        out = subprocess.run(["wpctl", "status"], capture_output=True, text=True, timeout=2).stdout
+        section = None
+        for line in out.splitlines():
+            if "Sinks:" in line:
+                section = "sinks"
+                continue
+            elif "Sources:" in line:
+                section = "sources"
+                continue
+            elif "Filters:" in line or "Streams:" in line or "Clients:" in line:
+                section = None
+                continue
+
+            if section == "sinks" and "*" in line:
+                clean = re.sub(r"^[│\s\*]+", "", line)
+                name = re.sub(r"^\d+\.\s*", "", clean)
+                name = re.sub(r"\s*\[vol:.*\]$", "", name).strip()
+                if name:
+                    res["default_sink"] = name
+            elif section == "sources" and "*" in line:
+                clean = re.sub(r"^[│\s\*]+", "", line)
+                name = re.sub(r"^\d+\.\s*", "", clean)
+                name = re.sub(r"\s*\[vol:.*\]$", "", name).strip()
+                if name:
+                    res["default_source"] = name
+    except Exception:
+        pass
+    return res
 
 
 @dataclass(frozen=True)
@@ -82,11 +123,13 @@ class PipeWireCaptureSession:
         channels: int = 1,
         sample_width: int = 2,
         target_node: str | None = None,
+        target_source: str = "mic",  # "mic" | "monitor" | "meeting" | "mixed"
     ):
         self.sample_rate = sample_rate
         self.channels = channels
         self.sample_width = sample_width
         self.target_node = target_node
+        self.target_source = target_source
 
         self.frame_ms = 32
         self.frame_samples = self.sample_rate * self.frame_ms // 1000  # 512 samples @ 16kHz
@@ -139,6 +182,7 @@ class PipeWireCaptureSession:
 
     def _build_capture_cmd(self, source: str = "mic") -> list[str]:
         """Construye el comando de captura con prioridad absoluta a PipeWire (pw-record)."""
+        src = self.target_source or source
         if shutil.which("pw-record"):
             cmd = [
                 "pw-record",
@@ -149,6 +193,11 @@ class PipeWireCaptureSession:
             ]
             if self.target_node:
                 cmd.extend(["--target", str(self.target_node)])
+            elif src in ("monitor", "pc", "sink"):
+                cmd.extend(["--target", "@DEFAULT_AUDIO_SINK@"])
+            elif src in ("mic", "source"):
+                cmd.extend(["--target", "@DEFAULT_AUDIO_SOURCE@"])
+            # meeting usa default auto o mezcla
             cmd.append("-")
             return cmd
         # Fallback a arecord si pw-record no estuviese instalado

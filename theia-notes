@@ -1,0 +1,19 @@
+#!/usr/bin/env python3
+"""Launcher para TheIA Notes (GUI de minutas de reunión con IA para Linux/Omarchy)."""
+import os
+import sys
+
+# Asegurar que el directorio del proyecto está en sys.path
+here = os.path.dirname(os.path.realpath(__file__))
+if here not in sys.path:
+    sys.path.insert(0, here)
+
+# Auto-bootstrap a .venv si existe
+venv_py = os.path.join(here, ".venv", "bin", "python3")
+if os.path.exists(venv_py) and os.path.realpath(sys.executable) != os.path.realpath(venv_py):
+    os.execv(venv_py, [venv_py] + sys.argv)
+
+from dictate.gui import main
+
+if __name__ == "__main__":
+    sys.exit(main())

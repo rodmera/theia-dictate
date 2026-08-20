@@ -8,6 +8,7 @@ import sys
 import os
 import io
 import struct
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -852,6 +853,89 @@ class TestDefaultGeminiProviderAndTools(unittest.TestCase):
             tools = report["system"]["tools"]
             self.assertIn("pw-record", tools)
             self.assertIn("wpctl", tools)
+
+
+class TestNotesSessionManager(unittest.TestCase):
+    def test_session_lifecycle_start_and_cleanup(self):
+        from dictate.session import NotesSessionManager
+
+        mgr = NotesSessionManager()
+        started = mgr.start_recording(source="meeting", language="es")
+        self.assertTrue(started)
+        self.assertEqual(mgr.state.status, "recording")
+        self.assertIsNotNone(mgr.session_dir)
+        self.assertTrue(os.path.exists(mgr.session_dir))
+
+        # Cancelar y asegurar que limpia el directorio temporal (0700)
+        s_dir = mgr.session_dir
+        mgr.cancel_session()
+        self.assertEqual(mgr.state.status, "idle")
+        self.assertFalse(os.path.exists(s_dir))
+
+    def test_session_stop_and_process_flow(self):
+        from dictate.session import NotesSessionManager
+        from unittest.mock import MagicMock
+        import time
+
+        mgr = NotesSessionManager()
+        mgr.start_recording(source="mic")
+
+        mock_transcribe = MagicMock(return_value={"text": "Reunión de revisión semanal de sprint", "provider": "gemini"})
+        mock_llm = MagicMock(return_value={
+            "note_title": "Sprint Review Semanal",
+            "summary": "Revisión de avance y tareas completadas.",
+            "key_points": ["HU-036 completada", "Dictate modernizado"],
+            "decisions": ["Aprobar release v1.4"],
+            "action_items": [{"task": "Subir a repo", "owner": "Rodrigo", "due": "hoy"}],
+            "tags": ["unique", "voice-note", "sprint"],
+        })
+
+        complete_event = threading.Event()
+        captured_note = []
+
+        def on_complete(note):
+            captured_note.append(note)
+            complete_event.set()
+
+        mgr.stop_and_process(
+            manual_notes="Sprint al 100%",
+            transcribe_fn=mock_transcribe,
+            llm_fn=mock_llm,
+            on_complete=on_complete,
+        )
+
+        completed = complete_event.wait(timeout=5.0)
+        self.assertTrue(completed)
+        self.assertEqual(len(captured_note), 1)
+        note = captured_note[0]
+        self.assertEqual(note.title, "Sprint Review Semanal")
+        self.assertEqual(len(note.key_points), 2)
+        self.assertEqual(len(note.decisions), 1)
+
+        # Guardar en Vault mediante capture_fn mock
+        mock_capture = MagicMock()
+        save_res = mgr.save_note_to_vault(note, capture_fn=mock_capture)
+        self.assertEqual(save_res.get("status"), "ok")
+        mock_capture.assert_called_once()
+
+
+class TestTheIANotesGUI(unittest.TestCase):
+    def test_source_key_mapping(self):
+        # Test unitario lógico sin necesidad de levantar display Wayland
+        from dictate.gui import TheIANotesWindow
+        # Mocking window helpers
+        class DummyWindow:
+            def __init__(self):
+                self.source_dropdown = type("DummyDropdown", (), {"get_selected": lambda self: 0})()
+            _get_selected_source_key = TheIANotesWindow._get_selected_source_key
+
+        win = DummyWindow()
+        win.source_dropdown.get_selected = lambda: 0
+        self.assertEqual(win._get_selected_source_key(), "meeting")
+        win.source_dropdown.get_selected = lambda: 1
+        self.assertEqual(win._get_selected_source_key(), "monitor")
+        win.source_dropdown.get_selected = lambda: 2
+        self.assertEqual(win._get_selected_source_key(), "mic")
 
 
 if __name__ == "__main__":
