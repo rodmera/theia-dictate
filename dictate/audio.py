@@ -180,6 +180,17 @@ class PipeWireCaptureSession:
                     pass
             self.proc = None
 
+    def _resolve_monitor_target(self) -> str:
+        """Resuelve el monitor source de la salida de audio activa de PipeWire."""
+        try:
+            res = subprocess.run(["pactl", "get-default-sink"], capture_output=True, text=True, timeout=2)
+            sink = res.stdout.strip()
+            if sink:
+                return f"{sink}.monitor"
+        except Exception:
+            pass
+        return "@DEFAULT_MONITOR@"
+
     def _build_capture_cmd(self, source: str = "mic") -> list[str]:
         """Construye el comando de captura con prioridad absoluta a PipeWire (pw-record)."""
         src = self.target_source or source
@@ -194,7 +205,7 @@ class PipeWireCaptureSession:
             if self.target_node:
                 cmd.extend(["--target", str(self.target_node)])
             elif src in ("monitor", "pc", "sink"):
-                cmd.extend(["--target", "@DEFAULT_AUDIO_SINK@"])
+                cmd.extend(["--target", self._resolve_monitor_target()])
             elif src in ("mic", "source"):
                 cmd.extend(["--target", "@DEFAULT_AUDIO_SOURCE@"])
             # meeting usa default auto o mezcla
