@@ -14,11 +14,37 @@ import argparse
 from datetime import datetime
 
 try:
-    import evdev
-    from evdev import UInput, ecodes as e
-    EVDEV_AVAILABLE = True
+    from dictate.audio import (
+        CaptureSession,
+        CapturedAudio,
+        PipeWireCaptureSession,
+        RecordingRequest,
+        RingRecorder,
+        write_wav as _write_wav,
+    )
+    from dictate.notes import (
+        StructuredNote,
+        extract_structured_note,
+        process_vault_note,
+        render_note_markdown,
+    )
 except ImportError:
-    EVDEV_AVAILABLE = False
+    # Fallback si se ejecuta antes de resolver sys.path
+    sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+    from dictate.audio import (
+        CaptureSession,
+        CapturedAudio,
+        PipeWireCaptureSession,
+        RecordingRequest,
+        RingRecorder,
+        write_wav as _write_wav,
+    )
+    from dictate.notes import (
+        StructuredNote,
+        extract_structured_note,
+        process_vault_note,
+        render_note_markdown,
+    )
 
 PID_FILE     = "/tmp/theia-dictate.pid"
 RECORDER_PID = "/tmp/theia-dictate-recorder.pid"
@@ -56,7 +82,7 @@ os.makedirs(os.path.dirname(CONFIG_FILE), exist_ok=True)
 DEFAULT_CONFIG = {
     "language": "es",
     "default_mode": "default",
-    "stt_provider": "local",             # "local" (faster-whisper) | "gemini" (Google AI Studio, sin costo) | "chirp" (Google Cloud STT)
+    "stt_provider": "gemini",            # "gemini" (Google Gemini 3.7 Flash, default) | "chirp" (Google Cloud STT) | "local" (faster-whisper)
     "stt_gemini_model": "gemini-3.7-flash",
     "stt_chirp_model": "chirp_3",
     "stt_chirp_region": "us",            # Chirp 3: multi-región "us"/"eu" (o europe-west2/3, asia-south1, northamerica-northeast1)
@@ -241,194 +267,6 @@ def show_history(n=10):
         else:
             text = (r.get('refined') or r.get('raw', ''))[:100]
             print(f"[{ts}] [{mode}] {text}")
-
-
-def _write_wav(path, raw_pcm, sample_rate=16000, channels=1, sample_width=2):
-    """Escribe raw PCM a un archivo WAV válido mono/16kHz/S16_LE."""
-    if not raw_pcm:
-        return False
-    data_size = len(raw_pcm)
-    header = struct.pack(
-        "<4sI4s4sIHHIIHH4sI",
-        b"RIFF", 36 + data_size, b"WAVE",
-        b"fmt ", 16, 1, channels, sample_rate,
-        sample_rate * channels * sample_width, channels * sample_width, 16,
-        b"data", data_size,
-    )
-    try:
-        with open(path, "wb") as f:
-            f.write(header)
-            f.write(raw_pcm)
-        return True
-    except Exception as e:
-        debug_log(f"_write_wav error: {e}")
-        return False
-
-
-class RingRecorder:
-    """
-    Grabador continuo en background con ringbuffer circular y pre-roll de 1.0s.
-    Mantiene arecord abierto permanentemente en un hilo dedicado para eliminar
-    el retardo de apertura del dispositivo ALSA (latencia de inicio 0ms).
-    """
-    def __init__(self, pre_roll_ms=1000, sample_rate=16000, channels=1, sample_width=2):
-        self.sample_rate = sample_rate
-        self.channels = channels
-        self.sample_width = sample_width
-        self.frame_ms = 32
-        self.frame_samples = self.sample_rate * self.frame_ms // 1000  # 512
-        self.frame_bytes = self.frame_samples * self.channels * self.sample_width  # 1024
-        self.pre_roll_frames = max(1, pre_roll_ms // self.frame_ms)
-        self.pre_roll_buffer = collections.deque(maxlen=self.pre_roll_frames)
-
-        self.active = False
-        self.recorded_bytes = bytearray()
-        self.lock = threading.Lock()
-
-        self.proc = None
-        self.thread = None
-        self.running = False
-        self.on_vad_stop_callback = None
-        self.vad_instance = None
-
-    def start(self):
-        """Inicia el hilo lector de arecord en background."""
-        if self.running:
-            return
-        self.running = True
-        self.thread = threading.Thread(target=self._reader_loop, daemon=True, name="RingRecorderReader")
-        self.thread.start()
-
-    def stop(self):
-        """Detiene el grabador y cierra el proceso arecord."""
-        self.running = False
-        self._kill_proc()
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=1.0)
-
-    def _kill_proc(self):
-        if self.proc:
-            try:
-                self.proc.terminate()
-                self.proc.wait(timeout=0.5)
-            except Exception:
-                try:
-                    self.proc.kill()
-                except Exception:
-                    pass
-            self.proc = None
-
-    def _reader_loop(self):
-        """Loop continuo que lee arecord y alimenta el ringbuffer o la grabación activa."""
-        while self.running:
-            cmd = ["arecord", "-D", "default", "-f", "S16_LE", "-c", str(self.channels),
-                   "-r", str(self.sample_rate), "-t", "raw"]
-            try:
-                self.proc = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    bufsize=self.frame_bytes * 10
-                )
-            except Exception as e:
-                debug_log(f"RingRecorder: error iniciando arecord: {e}")
-                time.sleep(1.0)
-                continue
-
-            try:
-                while self.running and self.proc and self.proc.poll() is None:
-                    chunk = self.proc.stdout.read(self.frame_bytes)
-                    if not chunk:
-                        break
-                    while len(chunk) < self.frame_bytes:
-                        more = self.proc.stdout.read(self.frame_bytes - len(chunk))
-                        if not more:
-                            break
-                        chunk += more
-                    if len(chunk) < self.frame_bytes:
-                        break
-
-                    ints = struct.unpack("<%dh" % (self.frame_bytes // self.sample_width), chunk)
-
-                    vad_stop = False
-                    with self.lock:
-                        if not self.active:
-                            self.pre_roll_buffer.append((ints, chunk))
-                        else:
-                            self.recorded_bytes.extend(chunk)
-                            if self.vad_instance:
-                                done, _ = self.vad_instance.push(list(ints), chunk)
-                                if done:
-                                    vad_stop = True
-
-                    if vad_stop and self.on_vad_stop_callback:
-                        debug_log("RingRecorder: VAD auto-stop detectado en stream")
-                        self.on_vad_stop_callback()
-
-            except Exception as read_err:
-                debug_log(f"RingRecorder: error en reader loop: {read_err}")
-            finally:
-                self._kill_proc()
-
-            if self.running:
-                debug_log("RingRecorder: arecord finalizó, reintentando en 0.5s...")
-                time.sleep(0.5)
-
-    def feed_frame(self, frame_ints, raw_bytes):
-        """Método de inyección directa de frames (usado en tests y simulación)."""
-        vad_stop = False
-        with self.lock:
-            if not self.active:
-                self.pre_roll_buffer.append((frame_ints, raw_bytes))
-            else:
-                self.recorded_bytes.extend(raw_bytes)
-                if self.vad_instance:
-                    done, _ = self.vad_instance.push(list(frame_ints), raw_bytes)
-                    if done:
-                        vad_stop = True
-
-        if vad_stop and self.on_vad_stop_callback:
-            self.on_vad_stop_callback()
-
-    def begin_recording(self, vad_instance=None, on_vad_stop=None):
-        """Activa la captura e incorpora inmediatamente los frames del pre-roll."""
-        with self.lock:
-            self.active = True
-            self.recorded_bytes = bytearray()
-            self.vad_instance = vad_instance
-            self.on_vad_stop_callback = on_vad_stop
-
-            # Incorporar el pre-roll acumulado (hasta 1000ms antes de la tecla)
-            for ints, raw in self.pre_roll_buffer:
-                self.recorded_bytes.extend(raw)
-                if self.vad_instance:
-                    self.vad_instance.push(list(ints), raw)
-            self.pre_roll_buffer.clear()
-            debug_log(f"RingRecorder: grabación iniciada con pre-roll ({len(self.recorded_bytes)} bytes)")
-
-    def end_recording(self, output_wav_path=AUDIO_FILE):
-        """Finaliza la captura activa, guarda en WAV y retorna el total de bytes."""
-        with self.lock:
-            self.active = False
-            self.vad_instance = None
-            self.on_vad_stop_callback = None
-            raw_pcm = bytes(self.recorded_bytes)
-            self.recorded_bytes = bytearray()
-
-        if raw_pcm:
-            _write_wav(output_wav_path, raw_pcm, sample_rate=self.sample_rate, channels=self.channels, sample_width=self.sample_width)
-            debug_log(f"RingRecorder: WAV escrito en {output_wav_path} ({len(raw_pcm)} bytes)")
-            return raw_pcm
-        return None
-
-    def cancel_recording(self):
-        """Descarta la captura activa sin guardar."""
-        with self.lock:
-            self.active = False
-            self.recorded_bytes = bytearray()
-            self.vad_instance = None
-            self.on_vad_stop_callback = None
-        debug_log("RingRecorder: grabación cancelada y descartada")
 
 
 def show_post_process_prompts():
@@ -1261,6 +1099,42 @@ def stop_and_transcribe():
                 "type": "STRING",
                 "description": "Título breve y descriptivo para la nota de Obsidian (máx 60 caracteres)."
             }
+            schema["properties"]["summary"] = {
+                "type": "STRING",
+                "description": "Resumen ejecutivo conciso de la nota o reunión."
+            }
+            schema["properties"]["topic"] = {
+                "type": "STRING",
+                "description": "Tema principal o contexto (ej: personal, proyecto, cliente, reunión)."
+            }
+            schema["properties"]["key_points"] = {
+                "type": "ARRAY",
+                "items": {"type": "STRING"},
+                "description": "Puntos clave o temas discutidos."
+            }
+            schema["properties"]["decisions"] = {
+                "type": "ARRAY",
+                "items": {"type": "STRING"},
+                "description": "Decisiones o conclusiones acordadas."
+            }
+            schema["properties"]["action_items"] = {
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "task": {"type": "STRING"},
+                        "owner": {"type": "STRING"},
+                        "due": {"type": "STRING"}
+                    },
+                    "required": ["task"]
+                },
+                "description": "Compromisos, acuerdos o tareas derivadas con responsable y plazo si aplica."
+            }
+            schema["properties"]["tags"] = {
+                "type": "ARRAY",
+                "items": {"type": "STRING"},
+                "description": "Tags relevantes para Obsidian (incluir 'unique' y 'voice-note')."
+            }
 
         prompt_llm = (
             f"Eres el cerebro de TheIA Dictate. Decide si el texto es un dictado pasivo o una orden activa.\n"
@@ -1386,18 +1260,15 @@ def stop_and_transcribe():
                     if pp_result:
                         final_text = pp_result
 
-            # Modo vault: guardar en Obsidian
+            # Modo vault: guardar en Obsidian mediante proceso estructurado determinista
             if is_vault:
-                sys.path.insert(0, os.path.expanduser('~/.openclaw/workspace/skills/obsidian-capture/scripts'))
-                try:
-                    from capture import capture_note
-                    ts = datetime.now().strftime("%Y%m%d%H%M")
-                    title = res_json.get("note_title") or f"Nota de voz {ts}"
-                    full_title = f"{ts} - {title}"
-                    capture_note(full_title, final_text, tags=['unique', 'voice-note'])
-                    notify(f"Nota guardada:\n{title}", "emblem-default", 3000)
-                except Exception as vault_err:
-                    notify(f"Error guardando en vault: {vault_err}", "dialog-error", 4000)
+                vault_res = process_vault_note(raw_text, res_json=res_json)
+                if vault_res.get("status") == "ok":
+                    notify(f"Nota guardada:\n{vault_res.get('title', 'Nota de voz')}", "emblem-default", 3000)
+                elif vault_res.get("status") == "skipped":
+                    notify("Nota ya procesada previamente (idempotente)", "dialog-information", 2000)
+                else:
+                    notify(f"Error guardando en vault: {vault_res.get('error')}", "dialog-error", 4000)
                 return
 
             # Modo paste normal (con append opcional)
@@ -1443,8 +1314,9 @@ def start_recording(mode_override=None, append=False):
 
     if silence_timeout:
         proc = subprocess.Popen(
-            ["sox", "-t", "alsa", "default", "-r", "16000", "-c", "1", "-b", "16", AUDIO_FILE,
-             "silence", "1", "0.1", "1%", "1", str(float(silence_timeout)), "1%"],
+            ["pw-record", "--container", "wav", "--format", "s16", "--rate", "16000", "--channels", "1", AUDIO_FILE]
+            if shutil.which("pw-record") else
+            ["arecord", "-D", "default", "-f", "S16_LE", "-c", "1", "-r", "16000", AUDIO_FILE],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
         watcher_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "silence_watcher.py")
@@ -1453,7 +1325,7 @@ def start_recording(mode_override=None, append=False):
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
     elif config.get("auto_stop") == "vad":
-        # VAD con suavizado (Silero/energía + onset/hangover/prefill) — función 1.
+        # VAD con suavizado (Silero/energía + onset/hangover/prefill)
         # vad.py captura por frames y escribe el WAV al cortar por silencio.
         vad_path = os.path.join(os.path.dirname(os.path.realpath(__file__)), "vad.py")
         vad_args = [sys.executable, vad_path,
@@ -1470,10 +1342,16 @@ def start_recording(mode_override=None, append=False):
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
         )
     else:
-        proc = subprocess.Popen(
-            ["arecord", "-D", "default", "-f", "S16_LE", "-c", "1", "-r", "16000", AUDIO_FILE],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-        )
+        if shutil.which("pw-record"):
+            proc = subprocess.Popen(
+                ["pw-record", "--container", "wav", "--format", "s16", "--rate", "16000", "--channels", "1", AUDIO_FILE],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        else:
+            proc = subprocess.Popen(
+                ["arecord", "-D", "default", "-f", "S16_LE", "-c", "1", "-r", "16000", AUDIO_FILE],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
 
     with open(RECORDER_PID, "w") as f:
         f.write(str(proc.pid))
@@ -1991,7 +1869,7 @@ def audit_providers(config=None):
     pid = daemon_pid()
     alive = daemon_alive(pid)
     tools = {}
-    for tool in ["wtype", "wl-copy", "wl-paste", "notify-send", "arecord", "sox", "playerctl"]:
+    for tool in ["wtype", "wl-copy", "wl-paste", "notify-send", "pw-record", "wpctl", "playerctl"]:
         tools[tool] = bool(os.system(f"which {tool} >/dev/null 2>&1") == 0)
 
     report["system"] = {

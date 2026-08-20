@@ -654,5 +654,205 @@ class TestOmarchyStatusJson(unittest.TestCase):
         self.assertIsNone(d["pid"])
 
 
+class TestPipeWireAudioCaptureSession(unittest.TestCase):
+    def test_session_implements_protocol(self):
+        from dictate.audio import CaptureSession, PipeWireCaptureSession, RecordingRequest, CapturedAudio
+        session = PipeWireCaptureSession()
+        self.assertTrue(isinstance(session, CaptureSession))
+
+    def test_recording_request_and_captured_audio_immutable(self):
+        from dictate.audio import RecordingRequest, CapturedAudio
+        req = RecordingRequest(mode="vault", language="es", source="mic")
+        self.assertEqual(req.mode, "vault")
+        self.assertEqual(req.source, "mic")
+
+        audio = CapturedAudio(
+            path="/tmp/test.wav",
+            sample_rate=16000,
+            channels=1,
+            sample_width=2,
+            duration_s=2.5,
+            recording_id="rec123",
+            source="mic"
+        )
+        self.assertEqual(audio.duration_s, 2.5)
+        self.assertEqual(audio.recording_id, "rec123")
+
+    def test_pipewire_command_builder_prioritizes_pw_record(self):
+        from unittest.mock import patch
+        from dictate.audio import PipeWireCaptureSession
+
+        with patch("shutil.which", return_value="/usr/bin/pw-record"):
+            session = PipeWireCaptureSession(sample_rate=16000, channels=1)
+            cmd = session._build_capture_cmd()
+            self.assertEqual(cmd[0], "pw-record")
+            self.assertIn("--container", cmd)
+            self.assertIn("raw", cmd)
+            self.assertIn("--rate", cmd)
+            self.assertIn("16000", cmd)
+
+    def test_pipewire_session_capture_flow(self):
+        import tempfile
+        from dictate.audio import PipeWireCaptureSession, RecordingRequest
+
+        session = PipeWireCaptureSession(pre_roll_ms=1000)
+        sample_frame = [1000] * 512
+        sample_bytes = b"\x08\x08" * 512
+
+        # 1. Simular pre-roll de 5 frames (160ms)
+        for _ in range(5):
+            session.feed_frame(sample_frame, sample_bytes)
+
+        # 2. Iniciar grabación
+        req = RecordingRequest(mode="notes", language="es")
+        session.begin_recording(req)
+        self.assertTrue(session.active)
+        self.assertTrue(len(session.recording_id) > 0)
+
+        # 3. Grabar 10 frames (320ms)
+        for _ in range(10):
+            session.feed_frame(sample_frame, sample_bytes)
+
+        # 4. Detener grabación
+        with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".wav") as f:
+            tmp_wav = f.name
+
+        try:
+            captured = session.stop_recording(tmp_wav)
+            self.assertFalse(session.active)
+            self.assertIsNotNone(captured)
+            self.assertEqual(captured.path, tmp_wav)
+            # Total frames: 5 pre-roll + 10 grabados = 15 frames * 1024 bytes = 15360 bytes
+            # 15360 / (16000 * 2) = 0.48s
+            self.assertEqual(captured.duration_s, 0.48)
+            self.assertTrue(os.path.exists(tmp_wav))
+            self.assertGreater(os.path.getsize(tmp_wav), 15000)
+        finally:
+            if os.path.exists(tmp_wav):
+                os.remove(tmp_wav)
+
+    def test_pipewire_session_cancel_recording(self):
+        from dictate.audio import PipeWireCaptureSession, RecordingRequest
+
+        session = PipeWireCaptureSession()
+        session.feed_frame([500] * 512, b"\x01\x01" * 512)
+        session.begin_recording(RecordingRequest(mode="raw"))
+        self.assertTrue(session.active)
+
+        session.cancel_recording()
+        self.assertFalse(session.active)
+        self.assertEqual(len(session.recorded_bytes), 0)
+
+
+class TestStructuredVaultNotes(unittest.TestCase):
+    def test_render_note_markdown_deterministic(self):
+        from dictate.notes import StructuredNote, render_note_markdown
+        from datetime import datetime
+
+        dt = datetime(2026, 8, 20, 13, 30)
+        note = StructuredNote(
+            title="Reunión TheIA y Plan de Despliegue",
+            created_at=dt,
+            summary="Se acordó la modernización del pipeline de captura y despliegue en Arch Linux.",
+            topic="theia-dictate",
+            key_points=[
+                "Migración completa de arecord a PipeWire pw-record",
+                "Integración de Gemini 3.7 Flash como motor STT primario",
+            ],
+            decisions=[
+                "Eliminar dependencias de SoX y ALSA directo",
+                "Utilizar capture_note como único punto de entrada a Obsidian",
+            ],
+            action_items=[
+                {"task": "Implementar PipeWireCaptureSession", "owner": "Rodrigo", "due": "2026-08-20"},
+                {"task": "Actualizar diagnósticos en doctor", "owner": "Rodrigo", "due": "hoy"},
+            ],
+            raw_transcript="Dictado de prueba sobre la reunión de TheIA y el plan de despliegue...",
+            tags=["unique", "voice-note", "theia", "arch-linux"],
+        )
+
+        md = render_note_markdown(note)
+        self.assertIn("## Resumen\n\nSe acordó la modernización", md)
+        self.assertIn("## Puntos Clave\n\n- Migración completa", md)
+        self.assertIn("## Decisiones\n\n- Eliminar dependencias", md)
+        self.assertIn("## Compromisos y Tareas\n\n- [ ] **Implementar PipeWireCaptureSession** (Responsable: Rodrigo | Plazo: 2026-08-20)", md)
+        self.assertIn("## Registro Textual\n\n> Dictado de prueba", md)
+
+    def test_extract_structured_note_from_llm_json(self):
+        from dictate.notes import extract_structured_note
+
+        llm_output = {
+            "note_title": "Plan de Marketing TheIA",
+            "summary": "Estrategia para el lanzamiento de nuevas soluciones.",
+            "topic": "marketing",
+            "key_points": ["Campañas en LinkedIn", "Pruebas de conversión"],
+            "decisions": ["Aprobar presupuesto Q3"],
+            "action_items": [{"task": "Publicar artículo de blog", "owner": "Rodrigo", "due": "lunes"}],
+            "tags": ["unique", "marketing", "theia"],
+        }
+
+        note = extract_structured_note("Transcripción original...", res_json=llm_output)
+        self.assertEqual(note.title, "Plan de Marketing TheIA")
+        self.assertEqual(note.topic, "marketing")
+        self.assertEqual(len(note.key_points), 2)
+        self.assertEqual(len(note.decisions), 1)
+        self.assertEqual(len(note.action_items), 1)
+        self.assertIn("unique", note.tags)
+
+    def test_process_vault_note_invokes_capture_fn_and_is_idempotent(self):
+        from dictate.notes import process_vault_note
+        from unittest.mock import MagicMock
+
+        mock_capture = MagicMock()
+        rec_id = "test_rec_unique_123"
+
+        # Primer pase: procesa y llama capture_fn
+        res1 = process_vault_note(
+            raw_text="Notas de la llamada con cliente",
+            res_json={"note_title": "Llamada Cliente", "summary": "Detalles del proyecto"},
+            capture_fn=mock_capture,
+            recording_id=rec_id,
+        )
+        self.assertEqual(res1.get("status"), "ok")
+        mock_capture.assert_called_once()
+
+        # Segundo pase con mismo recording_id: es idempotente y no duplica la nota
+        res2 = process_vault_note(
+            raw_text="Notas de la llamada con cliente",
+            res_json={"note_title": "Llamada Cliente", "summary": "Detalles del proyecto"},
+            capture_fn=mock_capture,
+            recording_id=rec_id,
+        )
+        self.assertEqual(res2.get("status"), "skipped")
+        self.assertEqual(mock_capture.call_count, 1)
+
+
+class TestPipeWireVadFrames(unittest.TestCase):
+    def test_vad_build_capture_cmd_uses_pipewire(self):
+        from unittest.mock import patch
+        import vad
+
+        with patch("shutil.which", return_value="/usr/bin/pw-record"):
+            cmd = vad._build_capture_cmd()
+            self.assertEqual(cmd[0], "pw-record")
+            self.assertIn("raw", cmd)
+
+
+class TestDefaultGeminiProviderAndTools(unittest.TestCase):
+    def test_default_config_provider_is_gemini_37_flash(self):
+        cfg = _ns["DEFAULT_CONFIG"]
+        self.assertEqual(cfg["stt_provider"], "gemini")
+        self.assertEqual(cfg["stt_gemini_model"], "gemini-3.7-flash")
+
+    def test_audit_providers_checks_pipewire_tools(self):
+        from unittest.mock import patch
+
+        with patch("os.system", return_value=0):
+            report = audit_providers()
+            tools = report["system"]["tools"]
+            self.assertIn("pw-record", tools)
+            self.assertIn("wpctl", tools)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

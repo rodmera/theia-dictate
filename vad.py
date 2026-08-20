@@ -18,6 +18,7 @@ import argparse
 import json
 import math
 import os
+import shutil
 import signal
 import struct
 import subprocess
@@ -172,15 +173,33 @@ class SmoothedVad:
         return bytes(self.recorded) if self.speech_detected else None
 
 
-def _iter_arecord_frames(cmd):
+def _build_capture_cmd():
+    if shutil.which("pw-record"):
+        return [
+            "pw-record",
+            "--container", "raw",
+            "--format", "s16",
+            "--rate", str(SAMPLE_RATE),
+            "--channels", str(CHANNELS),
+            "-"
+        ]
+    return [
+        "arecord", "-D", "default", "-f", "S16_LE",
+        "-c", str(CHANNELS), "-r", str(SAMPLE_RATE), "-t", "raw"
+    ]
+
+
+def _iter_pipewire_frames(cmd=None):
+    if cmd is None:
+        cmd = _build_capture_cmd()
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
     frame_bytes = FRAME_SAMPLES * CHANNELS * SAMPLE_WIDTH
     try:
         while True:
-            chunk = proc.stdout.read(frame_bytes)
+            chunk = proc.stdout.read(frame_bytes) if proc.stdout else b""
             if not chunk:
                 break
-            if len(chunk) < frame_bytes:
+            if len(chunk) < frame_bytes and proc.stdout:
                 chunk += proc.stdout.read(frame_bytes - len(chunk))
                 if len(chunk) < frame_bytes:
                     break
@@ -188,13 +207,17 @@ def _iter_arecord_frames(cmd):
             yield list(ints), chunk[:frame_bytes]
     finally:
         try:
-            proc.stdout.close()
+            if proc.stdout:
+                proc.stdout.close()
         except Exception:
             pass
         try:
             proc.terminate()
         except Exception:
             pass
+
+
+_iter_arecord_frames = _iter_pipewire_frames
 
 
 def _iter_wav_frames(path):
@@ -268,12 +291,8 @@ def main():
     if args.test_file:
         stream = _iter_wav_frames(args.test_file)
     else:
-        cmd = ["arecord", "-D", "default", "-f", "S16_LE", "-c", str(CHANNELS),
-               "-r", str(SAMPLE_RATE), "-t", "raw"]
-
-        # Un SOLO stream de arecord para calibrar y escuchar: reiniciar el proceso
-        # perdía los primeros ~200-500ms si el usuario hablaba al arrancar.
-        stream = _iter_arecord_frames(cmd)
+        cmd = _build_capture_cmd()
+        stream = _iter_pipewire_frames(cmd)
 
     # Iniciar la captura de arecord INMEDIATAMENTE antes de cargar Silero/Torch
     # para que el buffer del kernel ALSA empiece a capturar desde t=0 real de la tecla.
