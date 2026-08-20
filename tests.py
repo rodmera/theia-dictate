@@ -880,6 +880,11 @@ class TestNotesSessionManager(unittest.TestCase):
         mgr = NotesSessionManager()
         mgr.start_recording(source="mic")
 
+        # Inyectar 20 frames de señal dinámica (640ms @ 16kHz) para superar validación acústica
+        for i in range(20):
+            amp = 2000 if i % 2 == 0 else 8000
+            mgr.capture_session.feed_frame([amp] * 512, struct.pack("<512h", *([amp] * 512)))
+
         mock_transcribe = MagicMock(return_value={"text": "Reunión de revisión semanal de sprint", "provider": "gemini"})
         mock_llm = MagicMock(return_value={
             "note_title": "Sprint Review Semanal",
@@ -917,6 +922,192 @@ class TestNotesSessionManager(unittest.TestCase):
         save_res = mgr.save_note_to_vault(note, capture_fn=mock_capture)
         self.assertEqual(save_res.get("status"), "ok")
         mock_capture.assert_called_once()
+
+    def test_session_aborts_on_silent_audio_without_calling_llm(self):
+        from dictate.session import NotesSessionManager
+        from unittest.mock import MagicMock
+
+        mgr = NotesSessionManager()
+        mgr.start_recording(source="mic")
+
+        # Inyectar 20 frames de silencio absoluto (0)
+        for _ in range(20):
+            mgr.capture_session.feed_frame([0] * 512, b"\x00\x00" * 512)
+
+        mock_transcribe = MagicMock()
+        mock_llm = MagicMock()
+        error_event = threading.Event()
+        captured_error = []
+
+        def on_error(err):
+            captured_error.append(err)
+            error_event.set()
+
+        mgr.stop_and_process(
+            manual_notes="Notas de prueba",
+            transcribe_fn=mock_transcribe,
+            llm_fn=mock_llm,
+            on_error=on_error,
+        )
+
+        errored = error_event.wait(timeout=5.0)
+        self.assertTrue(errored)
+        self.assertEqual(mgr.state.status, "error")
+        self.assertIn("silencio", captured_error[0].lower())
+        # Asegurar que NO se llamó a transcripción ni al LLM
+        mock_transcribe.assert_not_called()
+        mock_llm.assert_not_called()
+
+    def test_session_aborts_on_blank_transcript_without_calling_llm(self):
+        from dictate.session import NotesSessionManager
+        from unittest.mock import MagicMock
+
+        mgr = NotesSessionManager()
+        mgr.start_recording(source="mic")
+
+        # Inyectar frames con señal de audio válida
+        for i in range(20):
+            amp = 3000 if i % 2 == 0 else 9000
+            mgr.capture_session.feed_frame([amp] * 512, struct.pack("<512h", *([amp] * 512)))
+
+        # Transcripción devuelve texto en blanco
+        mock_transcribe = MagicMock(return_value={"text": "   ... ??? "})
+        mock_llm = MagicMock()
+        error_event = threading.Event()
+        captured_error = []
+
+        def on_error(err):
+            captured_error.append(err)
+            error_event.set()
+
+        mgr.stop_and_process(
+            manual_notes="- Acuerdo inicial:\n- Tema discutido:\n- Tarea pendiente:",
+            transcribe_fn=mock_transcribe,
+            llm_fn=mock_llm,
+            on_error=on_error,
+        )
+
+        errored = error_event.wait(timeout=5.0)
+        self.assertTrue(errored)
+        self.assertEqual(mgr.state.status, "error")
+        self.assertIn("transcripción", captured_error[0].lower())
+        # Se llamó a transcripción, pero NO a Gemini
+        mock_transcribe.assert_called_once()
+        mock_llm.assert_not_called()
+
+
+class TestCapturedAudioValidator(unittest.TestCase):
+    def test_validate_missing_file_returns_audio_empty(self):
+        from dictate.validator import CapturedAudioValidator
+        v = CapturedAudioValidator()
+        res = v.validate("/tmp/non_existent_audio_file_987654.wav")
+        self.assertFalse(res.valid)
+        self.assertEqual(res.failure.code, "AUDIO_EMPTY")
+
+    def test_validate_too_short_audio(self):
+        import tempfile
+        import wave
+        from dictate.validator import CapturedAudioValidator
+
+        with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".wav") as f:
+            tmp_path = f.name
+            with wave.open(f, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                # 1600 frames = 0.1s (< 0.4s)
+                w.writeframes(b"\x10\x10" * 1600)
+
+        try:
+            v = CapturedAudioValidator(min_duration_s=0.4)
+            res = v.validate(tmp_path)
+            self.assertFalse(res.valid)
+            self.assertEqual(res.failure.code, "AUDIO_TOO_SHORT")
+            self.assertEqual(res.duration_s, 0.1)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_validate_silent_audio(self):
+        import tempfile
+        import wave
+        from dictate.validator import CapturedAudioValidator
+
+        with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".wav") as f:
+            tmp_path = f.name
+            with wave.open(f, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                # 16000 frames = 1.0s de ceros
+                w.writeframes(b"\x00\x00" * 16000)
+
+        try:
+            v = CapturedAudioValidator(min_rms=0.003)
+            res = v.validate(tmp_path)
+            self.assertFalse(res.valid)
+            self.assertEqual(res.failure.code, "AUDIO_SILENT")
+            self.assertLess(res.rms, 0.0001)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+    def test_validate_valid_speech_audio(self):
+        import tempfile
+        import wave
+        from dictate.validator import CapturedAudioValidator
+
+        with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".wav") as f:
+            tmp_path = f.name
+            with wave.open(f, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                # Señal dinámica con variabilidad de voz (1.0s)
+                raw_bytes = bytearray()
+                for i in range(32):
+                    amp = 3000 if (i % 4 == 0 or i % 4 == 1) else 12000
+                    raw_bytes.extend(struct.pack("<512h", *([amp] * 512)))
+                w.writeframes(bytes(raw_bytes))
+
+        try:
+            v = CapturedAudioValidator()
+            res = v.validate(tmp_path)
+            self.assertTrue(res.valid)
+            self.assertIsNone(res.failure)
+            self.assertGreater(res.rms, 0.05)
+            self.assertGreaterEqual(res.duration_s, 1.0)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
+
+class TestEvidenceGateAndNotesCleaning(unittest.TestCase):
+    def test_clean_manual_notes_filters_default_template(self):
+        from dictate.validator import clean_manual_notes
+
+        template_text = "- Acuerdo inicial: \n- Tema discutido: \n- Tarea pendiente: "
+        cleaned = clean_manual_notes(template_text)
+        self.assertEqual(cleaned, "")
+
+        mixed_text = "- Acuerdo inicial: \n- Proyecto TheIA Dictate aprobado para lanzamiento\n- Tarea pendiente: "
+        cleaned_mixed = clean_manual_notes(mixed_text)
+        self.assertEqual(cleaned_mixed, "- Proyecto TheIA Dictate aprobado para lanzamiento")
+
+    def test_evidence_gate_rejects_blank_and_accepts_valid(self):
+        from dictate.validator import EvidenceGate
+
+        res_empty = EvidenceGate.check_evidence("")
+        self.assertFalse(res_empty.valid)
+        self.assertEqual(res_empty.failure.code, "TRANSCRIPT_EMPTY")
+
+        res_punct = EvidenceGate.check_evidence("   ... ,,, ??? --- ")
+        self.assertFalse(res_punct.valid)
+        self.assertEqual(res_punct.failure.code, "TRANSCRIPT_EMPTY")
+
+        res_valid = EvidenceGate.check_evidence("Se revisó el backlog de sprint con el equipo.")
+        self.assertTrue(res_valid.valid)
+        self.assertIsNone(res_valid.failure)
 
 
 class TestTheIANotesGUI(unittest.TestCase):

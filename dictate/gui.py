@@ -135,9 +135,7 @@ class TheIANotesWindow(Gtk.ApplicationWindow):
 
         manual_scroller = Gtk.ScrolledWindow(min_content_height=110)
         self.txt_manual_notes = Gtk.TextView(wrap_mode=Gtk.WrapMode.WORD)
-        self.txt_manual_notes.get_buffer().set_text(
-            "- Acuerdo inicial: \n- Tema discutido: \n- Tarea pendiente: "
-        )
+        self.txt_manual_notes.get_buffer().set_text("")
         manual_scroller.set_child(self.txt_manual_notes)
         notes_box.append(manual_scroller)
 

@@ -23,6 +23,12 @@ from dictate.notes import (
     process_vault_note,
     render_note_markdown,
 )
+from dictate.validator import (
+    CapturedAudioValidator,
+    EvidenceGate,
+    PipeWireStreamProbe,
+    clean_manual_notes,
+)
 
 
 @dataclass
@@ -118,28 +124,70 @@ class NotesSessionManager:
         on_error: Callable[[str], None] | None,
     ) -> None:
         try:
-            # 1. Transcripción
+            # 1. Validación estricta de señal acústica (RMS, duración y decodificación)
+            validator = CapturedAudioValidator()
+            val_res = validator.validate(self.state.audio_path, source=self.state.source)
+            if not val_res.valid:
+                fail = val_res.failure
+                err_msg = fail.user_message if fail else "Audio no válido"
+                with self.lock:
+                    self.state.status = "error"
+                    self.state.error_message = err_msg
+                if on_error:
+                    on_error(err_msg)
+                return
+
+            # 2. Verificación de streams activos en PipeWire para audio de PC / Monitor
+            if self.state.source in ("monitor", "pc", "sink"):
+                if not PipeWireStreamProbe.check_sink_active_streams() and val_res.rms < 0.006:
+                    err_msg = "El audio del PC estaba en silencio: ninguna aplicación estaba emitiendo sonido."
+                    with self.lock:
+                        self.state.status = "error"
+                        self.state.error_message = err_msg
+                    if on_error:
+                        on_error(err_msg)
+                    return
+
+            # 3. Transcripción
             t_fn = transcribe_fn
             if t_fn is None:
-                from dictate.stt import transcribe_audio
+                try:
+                    from theia_dictate_module import transcribe_audio
+                except ImportError:
+                    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
+                    from theia_dictate import transcribe_audio
                 t_fn = lambda path, lang: transcribe_audio(path, language=lang, config=self.config)
 
             res_transcribe = t_fn(self.state.audio_path, self.state.language)
             raw_text = res_transcribe.get("text", "") if isinstance(res_transcribe, dict) else str(res_transcribe)
-            if not raw_text or res_transcribe.get("error"):
-                err = res_transcribe.get("error", "No se detectó audio en la llamada")
-                self.state.status = "error"
-                self.state.error_message = err
+            if not raw_text or (isinstance(res_transcribe, dict) and res_transcribe.get("error")):
+                err = res_transcribe.get("error", "No se detectó audio en la llamada") if isinstance(res_transcribe, dict) else "Fallo en transcripción"
+                with self.lock:
+                    self.state.status = "error"
+                    self.state.error_message = err
                 if on_error:
                     on_error(err)
                 return
 
-            # 2. Refinamiento semántico estructurado
+            # 4. Compuerta de evidencia textual y sanitización de plantilla de apuntes
+            cleaned_notes = clean_manual_notes(manual_notes)
+            ev_res = EvidenceGate.check_evidence(raw_text, cleaned_notes)
+            if not ev_res.valid:
+                fail = ev_res.failure
+                err_msg = fail.user_message if fail else "No se detectó transcripción con evidencia"
+                with self.lock:
+                    self.state.status = "error"
+                    self.state.error_message = err_msg
+                if on_error:
+                    on_error(err_msg)
+                return
+
+            # 5. Refinamiento semántico estructurado con blindaje anti-alucinación
             structured_res = None
             if llm_fn:
-                structured_res = llm_fn(raw_text, manual_notes)
+                structured_res = llm_fn(raw_text, cleaned_notes)
             else:
-                structured_res = self._call_gemini_meeting_refinement(raw_text, manual_notes)
+                structured_res = self._call_gemini_meeting_refinement(raw_text, cleaned_notes)
 
             note = extract_structured_note(raw_text, res_json=structured_res)
             with self.lock:
@@ -157,15 +205,17 @@ class NotesSessionManager:
                 on_error(str(exc))
 
     def _call_gemini_meeting_refinement(self, raw_text: str, manual_notes: str) -> dict[str, Any]:
-        """Envía la transcripción y notas manuales a Gemini 3.7 Flash para estructuración Granola."""
+        """Envía la transcripción y notas manuales a Gemini 3.7 Flash con blindaje anti-alucinación."""
         try:
             from shared_config import call_gemini_structured
         except Exception:
-            # Fallback simple
+            # Fallback determinista sin inventar datos
+            lines = [l.strip() for l in raw_text.splitlines() if l.strip()]
+            summary = manual_notes if manual_notes else (raw_text[:250] + ("..." if len(raw_text) > 250 else ""))
             return {
                 "note_title": f"Reunión {datetime.now().strftime('%Y-%m-%d %H:%M')}",
-                "summary": manual_notes or raw_text[:200],
-                "key_points": [line.strip("- ") for line in (manual_notes or raw_text).splitlines() if line.strip()][:5],
+                "summary": summary,
+                "key_points": [line.strip("- ") for line in lines[:4]],
                 "decisions": [],
                 "action_items": [],
                 "tags": ["unique", "voice-note", "reunion"],
@@ -218,11 +268,15 @@ class NotesSessionManager:
             "required": ["note_title", "summary"]
         }
 
-        notes_context = f"\nAPUNTES MANUALES DEL USUARIO (Prioridad contextual alta):\n{manual_notes}\n" if manual_notes else ""
+        notes_context = f"\nAPUNTES MANUALES DEL USUARIO (Contexto auxiliar):\n{manual_notes}\n" if manual_notes else ""
         prompt = (
             "Eres el asistente de reuniones ejecutivas TheIA Notes. Analiza la siguiente transcripción de reunión "
-            "junto a los apuntes manuales tomados en vivo por el usuario. Genera una minuta ejecutiva estilo Granola "
-            "con resumen conciso, puntos clave, decisiones y lista de tareas/compromisos con responsables claros.\n\n"
+            "junto a los apuntes manuales tomados en vivo por el usuario. Genera una minuta ejecutiva estilo Granola.\n\n"
+            "REGLAS CRÍTICAS DE EVIDENCIA Y ANTI-ALUCINACIÓN:\n"
+            "1. Básate EXCLUSIVAMENTE en el texto de la transcripción y los apuntes provistos.\n"
+            "2. Si un campo (como decisiones, tareas, fechas o personas) no fue mencionado explícitamente en la conversación, "
+            "déjalo como lista vacía []. PROHIBIDO inventar compromisos, acuerdos ni conclusiones no respaldados por la evidencia.\n"
+            "3. Si los apuntes del usuario aclaran un nombre propio o término técnico, prioriza esa ortografía.\n\n"
             f"{notes_context}"
             f"TRANSCRIPCIÓN COMPLETA DE LA LLAMADA:\n{raw_text}"
         )
