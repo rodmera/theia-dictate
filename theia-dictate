@@ -296,7 +296,7 @@ def show_post_process_prompts():
     print("\nEditá ~/.config/theia-dictate/config.json -> post_process para cambiarlos.")
 
 
-def notify(msg, icon="audio-input-microphone", expire=2000):
+def notify(msg, icon="audio-input-microphone-symbolic", expire=2000):
     """Notificación de escritorio estándar vía notify-send.
 
     Este es el esquema que funciona y se ve bien; no se usa el OSD de
@@ -1040,7 +1040,7 @@ def stop_and_transcribe():
     try:
         # Validación acústica de la señal antes de llamar a inferencia
         from dictate.validator import CapturedAudioValidator
-        val = CapturedAudioValidator(min_duration_s=0.35, min_rms=0.015)
+        val = CapturedAudioValidator(min_duration_s=0.35, min_rms=0.004, min_peak_rms=0.015)
         v_res = val.validate(AUDIO_FILE)
         if not v_res.valid:
             debug_log(f"stop_and_transcribe: audio descartado: {v_res.failure.code} ({v_res.failure.details})")
@@ -1397,7 +1397,7 @@ def start_recording(mode_override=None, append=False):
     mode_name = config.get("modes", {}).get(mode_key, {}).get("name", mode_key)
     suffix = " [+append]" if append else ""
     auto_suffix = " [auto-stop]" if silence_timeout else ""
-    notify(f"Escuchando... [{mode_name}]{suffix}{auto_suffix}", "media-record", 10000)
+    notify(f"Escuchando... [{mode_name}]{suffix}{auto_suffix}", "audio-input-microphone-symbolic", 10000)
 
 
 def run_daemon():
@@ -1531,7 +1531,7 @@ def run_daemon():
             subprocess.Popen([sys.executable, preloader_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         mode_name = cfg.get("modes", {}).get(mode_key, {}).get("name", mode_key)
-        notify(f"Escuchando... [{mode_name}]", "media-record", 10000)
+        notify(f"Escuchando... [{mode_name}]", "audio-input-microphone-symbolic", 10000)
 
     def on_stop(signum, frame):
         nonlocal watchdog_timer, recording_started_at, vad_triggered

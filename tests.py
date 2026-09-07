@@ -1109,6 +1109,34 @@ class TestCapturedAudioValidator(unittest.TestCase):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    def test_validate_short_speech_in_longer_silence_accepted(self):
+        import tempfile
+        import wave
+        from dictate.validator import CapturedAudioValidator
+
+        with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".wav") as f:
+            tmp_path = f.name
+            with wave.open(f, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                # 4.5s de ruido ambiente tenue (amp 120 ~ RMS 0.0037) + 0.5s de habla (amp 2500 ~ RMS 0.076)
+                raw_bytes = bytearray()
+                # 4.5s a 16kHz = 72000 samples de ruido tenue
+                raw_bytes.extend(struct.pack("<72000h", *([120] * 72000)))
+                # 0.5s a 16kHz = 8000 samples de voz
+                raw_bytes.extend(struct.pack("<8000h", *([2500] * 8000)))
+                w.writeframes(bytes(raw_bytes))
+
+        try:
+            v = CapturedAudioValidator(min_duration_s=0.35, min_rms=0.004, min_peak_rms=0.015)
+            res = v.validate(tmp_path)
+            self.assertTrue(res.valid)
+            self.assertIsNone(res.failure)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
 
 class TestEvidenceGateAndNotesCleaning(unittest.TestCase):
     def test_clean_manual_notes_filters_default_template(self):

@@ -99,9 +99,10 @@ def clean_manual_notes(manual_notes: str | None) -> str:
 class CapturedAudioValidator:
     """Validador determinista de señal acústica (RMS, duración y decodificación)."""
 
-    def __init__(self, min_duration_s: float = 0.4, min_rms: float = 0.003):
+    def __init__(self, min_duration_s: float = 0.4, min_rms: float = 0.004, min_peak_rms: float = 0.015):
         self.min_duration_s = min_duration_s
         self.min_rms = min_rms
+        self.min_peak_rms = min_peak_rms
 
     def validate(self, audio_path: str, source: str = "mic") -> ValidationResult:
         if not audio_path or not os.path.exists(audio_path):
@@ -186,21 +187,7 @@ class CapturedAudioValidator:
         sum_sq = sum((s / 32768.0) ** 2 for s in samples)
         rms = math.sqrt(sum_sq / num_samples)
 
-        if rms < self.min_rms:
-            return ValidationResult(
-                valid=False,
-                failure=ValidationFailure(
-                    code="AUDIO_SILENT",
-                    user_message=USER_MESSAGES["AUDIO_SILENT"],
-                    source=source,
-                    details=f"RMS {rms:.5f} < umbral {self.min_rms}",
-                ),
-                rms=rms,
-                duration_s=duration_s,
-                frames_count=n_frames,
-            )
-
-        # Análisis de dinámica (detección de flatline o zumbido constante estático)
+        # Análisis de dinámica y picos acústicos en chunks (~32ms @ 16kHz)
         chunk_size = 512  # ~32ms @ 16kHz
         chunk_rms_list = []
         for i in range(0, len(samples), chunk_size):
@@ -209,6 +196,23 @@ class CapturedAudioValidator:
                 continue
             c_rms = math.sqrt(sum((s / 32768.0) ** 2 for s in chunk) / len(chunk))
             chunk_rms_list.append(c_rms)
+
+        max_chunk_rms = max(chunk_rms_list) if chunk_rms_list else rms
+
+        # Se considera silencio solo si el RMS global es bajo Y no hubo picos de voz
+        if rms < self.min_rms and max_chunk_rms < self.min_peak_rms:
+            return ValidationResult(
+                valid=False,
+                failure=ValidationFailure(
+                    code="AUDIO_SILENT",
+                    user_message=USER_MESSAGES["AUDIO_SILENT"],
+                    source=source,
+                    details=f"RMS {rms:.5f} < umbral {self.min_rms} (pico {max_chunk_rms:.5f} < {self.min_peak_rms})",
+                ),
+                rms=rms,
+                duration_s=duration_s,
+                frames_count=n_frames,
+            )
 
         if chunk_rms_list:
             mean_c = sum(chunk_rms_list) / len(chunk_rms_list)
