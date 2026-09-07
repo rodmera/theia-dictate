@@ -38,13 +38,14 @@ STATUS_FILE = "/tmp/theia-dictate-vad-status.json"
 def _rms(ints):
     if not ints:
         return 0.0
-    return math.sqrt(sum(s * s for s in ints) / len(ints))
+    # Normalizado a [-1.0, 1.0] sobre S16_LE (32768)
+    return math.sqrt(sum(s * s for s in ints) / len(ints)) / 32768.0
 
 
 class EnergyVad:
     """Detección de voz por energía RMS por frame. Sin dependencias externas."""
 
-    def __init__(self, threshold=0.02):
+    def __init__(self, threshold=0.035):
         self.threshold = threshold
 
     def frame_is_speech(self, frame):
@@ -58,12 +59,12 @@ class EnergyVad:
         calibración (el umbral quedaría en nivel de voz y nada se detecta).
         El mínimo es robusto: basta un frame de silencio/ruido ambiente
         (típico entre palabras o al arrancar) para fijar un umbral sano.
-        threshold = max(min_rms * 1.3, 0.02).
+        threshold = max(noise * 1.5, 0.030).
         """
         if frames:
             floors = sorted(_rms(f) for f in frames)
             noise = floors[0]
-            self.threshold = max(noise * 1.3, 0.02)
+            self.threshold = max(noise * 1.5, 0.030)
 
 
 class SileroVadBackend:
@@ -93,7 +94,7 @@ class SileroVadBackend:
                 return bool(self.silero(torch.from_numpy(x), SAMPLE_RATE).item() > self.threshold)
             except Exception:
                 pass
-        return _rms(frame_int16) > 0.012
+        return _rms(frame_int16) > 0.035
 
 
 class SmoothedVad:

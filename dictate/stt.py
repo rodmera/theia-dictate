@@ -53,8 +53,10 @@ def _gemini_transcribe(audio_path: str, language: str = "es", model: str = "gemi
                     {"inline_data": {"mime_type": "audio/wav", "data": audio_b64}},
                     {
                         "text": (
-                            f"Transcribe el audio de voz en {language}. Devuelve el texto "
-                            "transcrito fielmente con puntuación adecuada."
+                            f"Transcribe fielmente el audio de voz en {language}. Devuelve únicamente el texto "
+                            "transcrito fielmente con puntuación adecuada.\n"
+                            "REGLA ESTRICTA: Si el audio es silencio, estática, ruido de fondo o no contiene voz "
+                            "humana clara, responde exactamente con la palabra 'VACIO'. PROHIBIDO inventar oraciones o adivinar palabras."
                         )
                     },
                 ]
@@ -82,8 +84,9 @@ def _gemini_transcribe(audio_path: str, language: str = "es", model: str = "gemi
     except (KeyError, IndexError):
         return {"error": f"Gemini respuesta sin texto: {str(data)[:300]}"}
 
-    if not text:
-        return {"error": "Gemini no devolvió texto (¿audio silencioso?)"}
+    cleaned = text.upper().strip().strip(".'\"")
+    if not text or cleaned in ("VACIO", "VACÍO", "EMPTY"):
+        return {"error": "No se detectó voz humana (silencio o ruido de fondo)", "text": ""}
     return {"text": text, "provider": "gemini", "model": model}
 
 

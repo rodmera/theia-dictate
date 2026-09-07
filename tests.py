@@ -1138,7 +1138,15 @@ class TestEvidenceGateAndNotesCleaning(unittest.TestCase):
         self.assertIsNone(res_valid.failure)
 
 
+try:
+    import gi
+    _has_gi = True
+except ImportError:
+    _has_gi = False
+
+
 class TestTheIANotesGUI(unittest.TestCase):
+    @unittest.skipUnless(_has_gi, "PyGObject (gi) no instalado en este entorno")
     def test_source_key_mapping(self):
         # Test unitario lógico sin necesidad de levantar display Wayland
         from dictate.gui import TheIANotesWindow
@@ -1155,6 +1163,47 @@ class TestTheIANotesGUI(unittest.TestCase):
         self.assertEqual(win._get_selected_source_key(), "monitor")
         win.source_dropdown.get_selected = lambda: 2
         self.assertEqual(win._get_selected_source_key(), "mic")
+
+
+class TestVadAcousticCalibrationAndAntiHallucination(unittest.TestCase):
+    def test_rms_normalized_and_threshold(self):
+        import math
+        import vad
+        # Ruido de fondo típico (amplitud ~640 en S16)
+        noise_frame = [int(640 * math.sin(i * 0.1)) for i in range(512)]
+        rms_noise = vad._rms(noise_frame)
+        self.assertLess(rms_noise, 0.030, f"RMS de ruido {rms_noise} debe ser < 0.030")
+
+        # Voz humana típica (amplitud ~3200 en S16)
+        speech_frame = [int(3200 * math.sin(i * 0.2)) for i in range(512)]
+        rms_speech = vad._rms(speech_frame)
+        self.assertGreater(rms_speech, 0.050, f"RMS de voz {rms_speech} debe ser > 0.050")
+
+        detector = vad.EnergyVad(threshold=0.035)
+        self.assertFalse(detector.frame_is_speech(noise_frame), "Ruido no debe detectarse como habla")
+        self.assertTrue(detector.frame_is_speech(speech_frame), "Voz debe detectarse como habla")
+
+    def test_gemini_transcribe_rejects_vacio_hallucination(self):
+        import json
+        from unittest.mock import MagicMock, patch
+        # Mock de respuesta HTTP de Gemini devolviendo 'VACIO' ante silencio
+        mock_response = json.dumps({
+            "candidates": [{
+                "content": {"parts": [{"text": "VACIO."}]}
+            }]
+        }).encode("utf-8")
+
+        mock_req = MagicMock()
+        mock_req.read.return_value = mock_response
+        mock_req.__enter__.return_value = mock_req
+        mock_req.__exit__.return_value = None
+
+        with patch("urllib.request.urlopen", return_value=mock_req), \
+             patch("os.path.exists", return_value=True), \
+             patch.dict(_ns, {"_wav_with_leading_silence": lambda p: b"RIFFdummywav"}):
+            res = _gemini_transcribe("/tmp/silent.wav")
+            self.assertEqual(res.get("text"), "")
+            self.assertIn("No se detectó voz", res.get("error", ""))
 
 
 if __name__ == "__main__":

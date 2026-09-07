@@ -602,8 +602,11 @@ def _gemini_transcribe(audio_path, language="es", model="gemini-3.8-flash"):
         "contents": [{
             "parts": [
                 {"inline_data": {"mime_type": "audio/wav", "data": audio_b64}},
-                {"text": f"Transcribe el audio de voz en {language}. Devuelve SOLO el texto "
-                         f"transcrito literalmente, sin agregar puntuación ni correcciones."},
+                {"text": (
+                    f"Transcribe el audio de voz en {language}. Devuelve SOLO las palabras habladas literalmente con su puntuación natural.\n"
+                    f"REGLA ESTRICTA: Si el audio es solo silencio, ruido de fondo, estática o no contiene voz humana real, "
+                    f"responde exactamente con la palabra 'VACIO'. PROHIBIDO inventar oraciones o adivinar palabras."
+                )},
             ]
         }],
         "generationConfig": {"temperature": 0.0}
@@ -624,8 +627,9 @@ def _gemini_transcribe(audio_path, language="es", model="gemini-3.8-flash"):
     except (KeyError, IndexError):
         return {"error": f"Gemini respuesta sin texto: {str(data)[:300]}"}
 
-    if not text:
-        return {"error": "Gemini no devolvió texto (¿audio silencioso?)"}
+    cleaned = text.upper().strip().strip(".'\"")
+    if not text or cleaned in ("VACIO", "VACÍO", "EMPTY") or is_blank_transcription(text):
+        return {"error": "No se detectó voz humana (silencio o ruido de fondo)", "text": ""}
     return {"text": text, "provider": "gemini", "model": model}
 
 
@@ -1034,6 +1038,15 @@ def stop_and_transcribe():
     stt_provider = config.get("stt_provider", "local")
 
     try:
+        # Validación acústica de la señal antes de llamar a inferencia
+        from dictate.validator import CapturedAudioValidator
+        val = CapturedAudioValidator(min_duration_s=0.35, min_rms=0.015)
+        v_res = val.validate(AUDIO_FILE)
+        if not v_res.valid:
+            debug_log(f"stop_and_transcribe: audio descartado: {v_res.failure.code} ({v_res.failure.details})")
+            notify("Audio no válido o sin voz", "dialog-warning", 2000)
+            return
+
         # 1. Transcripción con fallback automático en cascada
         res = transcribe_audio(AUDIO_FILE, language=language, config=config)
         debug_log(f"res.transcribe: provider={res.get('provider')} text={str(res.get('text',''))[:50]!r} error={res.get('error','')}")
@@ -1414,6 +1427,8 @@ def run_daemon():
             debug_log(f"run_daemon: fallo precargando detector VAD: {e}")
 
     watchdog_timer = None
+    recording_started_at = 0.0
+    vad_triggered = False
 
     def _watchdog_trigger():
         st = read_state()
@@ -1425,9 +1440,14 @@ def run_daemon():
                 debug_log(f"watchdog: error enviando señal SIGUSR2: {ex}")
 
     def on_start(signum, frame):
-        nonlocal watchdog_timer
+        nonlocal watchdog_timer, recording_started_at, vad_triggered
         st = read_state()
         if st != "idle":
+            # Si ya está grabando y han pasado más de 0.5s, un segundo on_start (ej. pulsación de F9 en modo toggle) significa STOP
+            if st == "recording" and (time.time() - recording_started_at) > 0.5:
+                debug_log("on_start recibido durante grabación activa (>0.5s) -> interpretando como toggle stop")
+                on_stop(signal.SIGUSR2, frame)
+                return
             debug_log(f"on_start: ignorado porque estado={st} != idle")
             return
 
@@ -1477,10 +1497,14 @@ def run_daemon():
                 debug_log(f"Error instanciando SmoothedVad: {ex}")
 
         def handle_vad_autostop():
+            nonlocal vad_triggered
+            vad_triggered = True
             # Señalizar stop al daemon desde el hilo lector de audio
             debug_log("VAD auto-stop disparado en stream continuo")
             os.kill(os.getpid(), signal.SIGUSR2)
 
+        recording_started_at = time.time()
+        vad_triggered = False
         set_state("recording")
         play_audio_feedback("start", config=cfg)
         recorder.begin_recording(vad_instance=active_vad, on_vad_stop=handle_vad_autostop)
@@ -1510,7 +1534,7 @@ def run_daemon():
         notify(f"Escuchando... [{mode_name}]", "media-record", 10000)
 
     def on_stop(signum, frame):
-        nonlocal watchdog_timer
+        nonlocal watchdog_timer, recording_started_at, vad_triggered
         if watchdog_timer is not None:
             try:
                 watchdog_timer.cancel()
@@ -1522,6 +1546,16 @@ def run_daemon():
             st = read_state()
             debug_log(f"on_stop: señal recibida, estado={st}")
             if st != "recording":
+                return
+
+            elapsed = time.time() - recording_started_at
+            # Toque rápido (tap): si la tecla se soltó en < 0.40s y no fue auto-stop de VAD,
+            # el usuario dio un toque para hablar en manos libres (no push-to-talk sostenido).
+            # Mantenemos la grabación activa esperando voz y corte automático por silencio.
+            is_vad = vad_triggered
+            vad_triggered = False
+            if not is_vad and elapsed < 0.40:
+                debug_log(f"on_stop: soltado rápido ({elapsed:.3f}s < 0.40s) -> manteniendo grabación activa en modo manos libres / VAD")
                 return
 
             if os.path.exists(CANCEL_FILE):
@@ -1537,8 +1571,8 @@ def run_daemon():
             play_audio_feedback("stop", config=load_config())
             # Finalizar captura e inmediatamente escribir WAV
             raw_pcm = recorder.end_recording(AUDIO_FILE)
-            if not raw_pcm:
-                debug_log("on_stop: sin audio grabado")
+            if not raw_pcm or len(raw_pcm) < 8000:
+                debug_log(f"on_stop: audio nulo o insuficiente ({len(raw_pcm) if raw_pcm else 0} bytes)")
                 set_state("idle")
                 return
 
