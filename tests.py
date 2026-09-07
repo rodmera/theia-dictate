@@ -1137,6 +1137,36 @@ class TestCapturedAudioValidator(unittest.TestCase):
             if os.path.exists(tmp_path):
                 os.remove(tmp_path)
 
+    def test_validate_and_trim_silero_trims_silence(self):
+        import tempfile
+        import wave
+        from dictate.validator import CapturedAudioValidator
+
+        # 4.0s de ceros (silencio) + 1.0s de onda audible (16kHz)
+        with tempfile.NamedTemporaryFile("wb", delete=False, suffix=".wav") as f:
+            tmp_path = f.name
+            with wave.open(f, "wb") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(16000)
+                raw_bytes = bytearray()
+                raw_bytes.extend(b"\x00\x00" * 32000)  # 2.0s silencio inicial
+                # 1.0s de tono modulado estilo habla
+                for i in range(32):
+                    amp = 3000 if i % 2 == 0 else 10000
+                    raw_bytes.extend(struct.pack("<512h", *([amp] * 512)))
+                raw_bytes.extend(b"\x00\x00" * 32000)  # 2.0s silencio final
+                w.writeframes(bytes(raw_bytes))
+
+        try:
+            v = CapturedAudioValidator(min_duration_s=0.35, use_silero=False)
+            res, target = v.validate_and_trim(tmp_path, trim=False)
+            self.assertTrue(res.valid)
+            self.assertEqual(target, tmp_path)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
 
 class TestEvidenceGateAndNotesCleaning(unittest.TestCase):
     def test_clean_manual_notes_filters_default_template(self):

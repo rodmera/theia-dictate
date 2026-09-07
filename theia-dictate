@@ -1038,17 +1038,17 @@ def stop_and_transcribe():
     stt_provider = config.get("stt_provider", "local")
 
     try:
-        # Validación acústica de la señal antes de llamar a inferencia
+        # Validación y recorte neuronal de habla (Silero VAD - SOTA)
         from dictate.validator import CapturedAudioValidator
-        val = CapturedAudioValidator(min_duration_s=0.35, min_rms=0.004, min_peak_rms=0.015)
-        v_res = val.validate(AUDIO_FILE)
+        val = CapturedAudioValidator(min_duration_s=0.35, silero_threshold=0.35)
+        v_res, target_audio = val.validate_and_trim(AUDIO_FILE, trim=True)
         if not v_res.valid:
             debug_log(f"stop_and_transcribe: audio descartado: {v_res.failure.code} ({v_res.failure.details})")
             notify("Audio no válido o sin voz", "dialog-warning", 2000)
             return
 
         # 1. Transcripción con fallback automático en cascada
-        res = transcribe_audio(AUDIO_FILE, language=language, config=config)
+        res = transcribe_audio(target_audio, language=language, config=config)
         debug_log(f"res.transcribe: provider={res.get('provider')} text={str(res.get('text',''))[:50]!r} error={res.get('error','')}")
 
         raw_text = res.get("text", "")
