@@ -141,7 +141,7 @@ class PipeWireCaptureSession:
         self.current_request: RecordingRequest | None = None
         self.recording_id: str = ""
         self.recorded_bytes = bytearray()
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
 
         self.proc: subprocess.Popen | None = None
         self.thread: threading.Thread | None = None
@@ -248,18 +248,23 @@ class PipeWireCaptureSession:
                     ints = struct.unpack("<%dh" % (self.frame_bytes // self.sample_width), chunk)
 
                     vad_stop = False
+                    vad_inst = None
+                    cb = None
                     with self.lock:
                         if not self.active:
                             self.pre_roll_buffer.append((ints, chunk))
                         else:
                             self.recorded_bytes.extend(chunk)
-                            if self.vad_instance:
-                                done, _ = self.vad_instance.push(list(ints), chunk)
-                                if done:
-                                    vad_stop = True
+                            vad_inst = self.vad_instance
+                            cb = self.on_vad_stop_callback
 
-                    if vad_stop and self.on_vad_stop_callback:
-                        self.on_vad_stop_callback()
+                    if vad_inst:
+                        done, _ = vad_inst.push(list(ints), chunk)
+                        if done:
+                            vad_stop = True
+
+                    if vad_stop and cb:
+                        cb()
 
             except Exception:
                 pass
@@ -271,18 +276,23 @@ class PipeWireCaptureSession:
     def feed_frame(self, frame_ints: Any, raw_bytes: bytes) -> None:
         """Inyección directa de frames (usado en tests y simulación de hardware)."""
         vad_stop = False
+        vad_inst = None
+        cb = None
         with self.lock:
             if not self.active:
                 self.pre_roll_buffer.append((frame_ints, raw_bytes))
             else:
                 self.recorded_bytes.extend(raw_bytes)
-                if self.vad_instance:
-                    done, _ = self.vad_instance.push(list(frame_ints), raw_bytes)
-                    if done:
-                        vad_stop = True
+                vad_inst = self.vad_instance
+                cb = self.on_vad_stop_callback
 
-        if vad_stop and self.on_vad_stop_callback:
-            self.on_vad_stop_callback()
+        if vad_inst:
+            done, _ = vad_inst.push(list(frame_ints), raw_bytes)
+            if done:
+                vad_stop = True
+
+        if vad_stop and cb:
+            cb()
 
     def begin_recording(
         self,
@@ -301,11 +311,10 @@ class PipeWireCaptureSession:
                 self.on_vad_stop_callback = on_vad_stop
 
             # Drenar pre-roll acumulado antes de la pulsación
-            for ints, chunk in self.pre_roll_buffer:
-                self.recorded_bytes.extend(chunk)
-                if self.vad_instance:
-                    self.vad_instance.push(list(ints), chunk)
+            preroll_items = list(self.pre_roll_buffer)
             self.pre_roll_buffer.clear()
+            for _, chunk in preroll_items:
+                self.recorded_bytes.extend(chunk)
 
     def stop_recording(self, output_path: str = "/tmp/theia-dictate-audio.wav") -> CapturedAudio | None:
         """Finaliza la grabación activa y escribe el archivo WAV final."""

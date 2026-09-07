@@ -118,6 +118,18 @@ class TestSmoothedVad(unittest.TestCase):
         # Debe incluir los frames de voz desde t=0 (no solo desde el onset+prefill)
         self.assertGreaterEqual(len(final) // (2 * FRAME_SAMPLES), 12)
 
+    def test_initial_silence_timeout_triggers(self):
+        # 40 frames de silencio con max_initial_silence_ms=1000 (~31 frames) -> corta automáticamente
+        kw = dict(max_initial_silence_ms=1000)
+        inst = SmoothedVad(EnergyVad(), **kw)
+        cut = False
+        for _ in range(40):
+            done, _ = inst.push(_frame(0), _raw(_frame(0)))
+            if done:
+                cut = True
+                break
+        self.assertTrue(cut, "Debe cortar por inactividad si no se detecta voz")
+
     def test_box_builds_with_arecord(self):
         # Solo verifica construcción del comando (sin ejecutar arecord real)
         cmd = vad._iter_arecord_frames  # no-op, solo referencia
@@ -221,12 +233,12 @@ class TestSttProviderFallback(unittest.TestCase):
         cfg = {
             "stt_provider": "chirp",
             "stt_chirp_project": "test-project",
-            "stt_gemini_model": "gemini-3.7-flash",
+            "stt_gemini_model": "gemini-3.8-flash",
         }
 
         with patch.dict(_ns, {
             "_chirp_transcribe": lambda *a, **k: {"error": "Token theia HTTP 400: reauth related error (invalid_rapt)"},
-            "_gemini_transcribe": lambda *a, **k: {"text": "Texto transcrito por Gemini fallback", "provider": "gemini", "model": "gemini-3.7-flash"},
+            "_gemini_transcribe": lambda *a, **k: {"text": "Texto transcrito por Gemini fallback", "provider": "gemini", "model": "gemini-3.8-flash"},
         }):
             res = _ns["transcribe_audio"]("/tmp/test.wav", language="es", config=cfg)
             self.assertEqual(res.get("text"), "Texto transcrito por Gemini fallback")
@@ -392,6 +404,22 @@ class TestStaleStateHealing(unittest.TestCase):
 
         st = read_state()
         self.assertEqual(st, "recording")
+
+    def test_read_state_heals_stale_recording_state_when_older_than_max_age(self):
+        import time
+        # Escribir estado 'recording' con PID vivo pero mtime de hace 100 segundos
+        with open(self.tmp_state_file, "w") as f:
+            f.write("recording")
+        with open(self.tmp_pid_file, "w") as f:
+            f.write(str(os.getpid()))
+
+        old_time = time.time() - 120.0
+        os.utime(self.tmp_state_file, (old_time, old_time))
+
+        st = read_state()
+        self.assertEqual(st, "idle", "read_state debe auto-sanar si la grabación excede el tiempo máximo")
+        with open(self.tmp_state_file) as f:
+            self.assertEqual(f.read().strip(), "idle")
 
 
 class TestDoctorDiagnostics(unittest.TestCase):
@@ -843,7 +871,7 @@ class TestDefaultGeminiProviderAndTools(unittest.TestCase):
     def test_default_config_provider_is_gemini_37_flash(self):
         cfg = _ns["DEFAULT_CONFIG"]
         self.assertEqual(cfg["stt_provider"], "gemini")
-        self.assertEqual(cfg["stt_gemini_model"], "gemini-3.7-flash")
+        self.assertEqual(cfg["stt_gemini_model"], "gemini-3.8-flash")
 
     def test_audit_providers_checks_pipewire_tools(self):
         from unittest.mock import patch

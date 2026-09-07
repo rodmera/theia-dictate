@@ -21,8 +21,8 @@ def _wav_with_leading_silence(audio_path: str, silence_ms: int = 150) -> bytes:
         return f.read()
 
 
-def _gemini_transcribe(audio_path: str, language: str = "es", model: str = "gemini-3.7-flash") -> dict[str, Any]:
-    """Transcripción directa de audio con Gemini 3.7 Flash."""
+def _gemini_transcribe(audio_path: str, language: str = "es", model: str = "gemini-3.8-flash") -> dict[str, Any]:
+    """Transcripción directa de audio con Gemini 3.8 Flash."""
     sys.path.insert(0, os.path.expanduser("~/.openclaw/workspace/skills"))
     try:
         from shared_config import GEMINI_API_KEY

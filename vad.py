@@ -117,7 +117,7 @@ class SmoothedVad:
     """
 
     def __init__(self, detector, onset_ms=120, hangover_ms=500, prefill_ms=1000,
-                 max_silence_ms=1500):
+                 max_silence_ms=1500, max_initial_silence_ms=5000, max_recording_ms=60000):
         self.detector = detector
         self.frame_ms = FRAME_MS
         self.onset_frames = max(1, onset_ms // self.frame_ms)
@@ -125,11 +125,19 @@ class SmoothedVad:
         # prefill ya no se usa para el corte (grabamos desde t=0); se mantiene
         # el parámetro por compatibilidad de firma.
         self.max_idle_frames = max(1, max_silence_ms // self.frame_ms)
+        self.max_initial_silence_frames = (
+            max(1, max_initial_silence_ms // self.frame_ms) if max_initial_silence_ms else None
+        )
+        self.max_recording_frames = (
+            max(1, max_recording_ms // self.frame_ms) if max_recording_ms else None
+        )
 
         self.recorded = bytearray()  # TODO el audio capturado desde t=0
         self.onset_counter = 0
         self.hangover_frames_left = 0
         self.idle_frames = 0
+        self.initial_silence_frames = 0
+        self.total_frames = 0
         self.in_speech = False
         self.speech_detected = False
 
@@ -139,6 +147,12 @@ class SmoothedVad:
 
         # Grabar SIEMPRE desde t=0: nunca recortar la cabeza del audio.
         self.recorded.extend(raw_bytes)
+        self.total_frames += 1
+
+        # Hard ceiling de grabación continua (60s por defecto)
+        if self.max_recording_frames and self.total_frames >= self.max_recording_frames:
+            self.in_speech = False
+            return True, bytes(self.recorded)
 
         if not self.in_speech:
             if is_speech:
@@ -150,6 +164,11 @@ class SmoothedVad:
                     self.idle_frames = 0
             else:
                 self.onset_counter = 0
+                if not self.speech_detected and self.max_initial_silence_frames:
+                    self.initial_silence_frames += 1
+                    if self.initial_silence_frames >= self.max_initial_silence_frames:
+                        # Auto-stop si el usuario no habló tras el inicio (inactividad)
+                        return True, None
             return False, None
 
         # En habla: actualizar ventana de corte

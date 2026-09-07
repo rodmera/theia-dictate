@@ -83,7 +83,7 @@ DEFAULT_CONFIG = {
     "language": "es",
     "default_mode": "default",
     "stt_provider": "gemini",            # "gemini" (Google Gemini 3.7 Flash, default) | "chirp" (Google Cloud STT) | "local" (faster-whisper)
-    "stt_gemini_model": "gemini-3.7-flash",
+    "stt_gemini_model": "gemini-3.8-flash",
     "stt_chirp_model": "chirp_3",
     "stt_chirp_region": "us",            # Chirp 3: multi-región "us"/"eu" (o europe-west2/3, asia-south1, northamerica-northeast1)
     "stt_chirp_project": "",             # project id de theia para X-Goog-User-Project
@@ -223,13 +223,24 @@ def read_state():
         return "idle"
 
     # Con RingRecorder en daemon, la grabación corre dentro del hilo del daemon (daemon_pid).
-    # Solo auto-sanar si el DAEMON está muerto.
+    # Auto-sanar si el DAEMON está muerto O si el archivo de estado quedó rancio por timeout.
     if st in ("recording", "transcribing"):
         dpid = daemon_pid()
         if not dpid or not daemon_alive(dpid):
             debug_log(f"read_state: estado '{st}' rancio con daemon muerto -> auto-sanar a 'idle'")
             set_state("idle")
             return "idle"
+
+        try:
+            mtime = os.path.getmtime(STATE_FILE)
+            elapsed = time.time() - mtime
+            max_age = 75.0 if st == "recording" else 60.0
+            if elapsed > max_age:
+                debug_log(f"read_state: estado '{st}' rancio ({elapsed:.1f}s > {max_age}s) -> auto-sanar a 'idle'")
+                set_state("idle")
+                return "idle"
+        except Exception:
+            pass
 
     return st
 
@@ -560,7 +571,7 @@ def _wav_with_leading_silence(audio_path, silence_ms=250):
     return buf.getvalue()
 
 
-def _gemini_transcribe(audio_path, language="es", model="gemini-3.7-flash"):
+def _gemini_transcribe(audio_path, language="es", model="gemini-3.8-flash"):
     """Transcripción de audio con Gemini (stt_provider=gemini).
 
     Envía el WAV inline a la API de Gemini. Retorna dict con 'text' (misma
@@ -930,7 +941,7 @@ def transcribe_audio(audio_path, language="es", config=None):
             res = _gemini_transcribe(
                 audio_path,
                 language=language,
-                model=config.get("stt_gemini_model", "gemini-3.7-flash"),
+                model=config.get("stt_gemini_model", "gemini-3.8-flash"),
             )
         elif prov == "chirp":
             res = _chirp_transcribe(
@@ -1144,7 +1155,7 @@ def stop_and_transcribe():
             f"Texto dictado (puede tener errores fonéticos de Whisper): \"{raw_text}\""
         )
 
-        res_json = call_gemini_structured(prompt_llm, schema, model="gemini-3.7-flash",
+        res_json = call_gemini_structured(prompt_llm, schema, model="gemini-3.8-flash",
                                           temperature=0.1, timeout=45)
         if not res_json:
             raise Exception("Falla en API Gemini")
@@ -1402,7 +1413,19 @@ def run_daemon():
         except Exception as e:
             debug_log(f"run_daemon: fallo precargando detector VAD: {e}")
 
+    watchdog_timer = None
+
+    def _watchdog_trigger():
+        st = read_state()
+        if st == "recording":
+            debug_log("watchdog: tiempo máximo alcanzado sin corte, forzando stop de grabación")
+            try:
+                os.kill(os.getpid(), signal.SIGUSR2)
+            except Exception as ex:
+                debug_log(f"watchdog: error enviando señal SIGUSR2: {ex}")
+
     def on_start(signum, frame):
+        nonlocal watchdog_timer
         st = read_state()
         if st != "idle":
             debug_log(f"on_start: ignorado porque estado={st} != idle")
@@ -1440,12 +1463,15 @@ def run_daemon():
         if cfg.get("auto_stop") == "vad" and vad_detector:
             try:
                 from vad import SmoothedVad
+                max_rec_sec = float(cfg.get("max_recording_seconds", 60.0))
                 active_vad = SmoothedVad(
                     vad_detector,
                     onset_ms=int(cfg.get("vad_onset_ms", 120)),
                     hangover_ms=int(cfg.get("vad_hangover_ms", 500)),
                     prefill_ms=int(cfg.get("vad_prefill_ms", 240)),
-                    max_silence_ms=int(cfg.get("vad_max_silence_ms", 1500))
+                    max_silence_ms=int(cfg.get("vad_max_silence_ms", 1500)),
+                    max_initial_silence_ms=int(cfg.get("vad_max_initial_silence_ms", 5000)),
+                    max_recording_ms=int(max_rec_sec * 1000)
                 )
             except Exception as ex:
                 debug_log(f"Error instanciando SmoothedVad: {ex}")
@@ -1458,6 +1484,17 @@ def run_daemon():
         set_state("recording")
         play_audio_feedback("start", config=cfg)
         recorder.begin_recording(vad_instance=active_vad, on_vad_stop=handle_vad_autostop)
+
+        # Watchdog de seguridad (límite duro de tiempo para evitar grabaciones infinitas)
+        if watchdog_timer is not None:
+            try:
+                watchdog_timer.cancel()
+            except Exception:
+                pass
+        max_duration = float(cfg.get("max_recording_seconds", 60.0))
+        watchdog_timer = threading.Timer(max_duration, _watchdog_trigger)
+        watchdog_timer.daemon = True
+        watchdog_timer.start()
 
         # Pausar reproducción MPRIS
         try:
@@ -1473,33 +1510,52 @@ def run_daemon():
         notify(f"Escuchando... [{mode_name}]", "media-record", 10000)
 
     def on_stop(signum, frame):
-        st = read_state()
-        debug_log(f"on_stop: señal recibida, estado={st}")
-        if st != "recording":
-            return
-
-        if os.path.exists(CANCEL_FILE):
+        nonlocal watchdog_timer
+        if watchdog_timer is not None:
             try:
-                os.remove(CANCEL_FILE)
-            except FileNotFoundError:
+                watchdog_timer.cancel()
+            except Exception:
                 pass
-            recorder.cancel_recording()
-            os.system("pkill -f 'preloader.py'")
-            set_state("idle")
-            return
+            watchdog_timer = None
 
-        play_audio_feedback("stop", config=load_config())
-        # Finalizar captura e inmediatamente escribir WAV
-        raw_pcm = recorder.end_recording(AUDIO_FILE)
-        if not raw_pcm:
-            debug_log("on_stop: sin audio grabado")
-            set_state("idle")
-            return
+        try:
+            st = read_state()
+            debug_log(f"on_stop: señal recibida, estado={st}")
+            if st != "recording":
+                return
 
-        # Ejecutar transcripción y post-proceso en hilo separado para mantener el daemon reactivo
-        threading.Thread(target=stop_and_transcribe, daemon=True).start()
+            if os.path.exists(CANCEL_FILE):
+                try:
+                    os.remove(CANCEL_FILE)
+                except FileNotFoundError:
+                    pass
+                recorder.cancel_recording()
+                os.system("pkill -f 'preloader.py'")
+                set_state("idle")
+                return
+
+            play_audio_feedback("stop", config=load_config())
+            # Finalizar captura e inmediatamente escribir WAV
+            raw_pcm = recorder.end_recording(AUDIO_FILE)
+            if not raw_pcm:
+                debug_log("on_stop: sin audio grabado")
+                set_state("idle")
+                return
+
+            # Ejecutar transcripción y post-proceso en hilo separado para mantener el daemon reactivo
+            threading.Thread(target=stop_and_transcribe, daemon=True, name="StopAndTranscribeThread").start()
+        except Exception as ex:
+            debug_log(f"on_stop: excepción inesperada: {ex}")
+            set_state("idle")
 
     def on_term(signum, frame):
+        nonlocal watchdog_timer
+        if watchdog_timer is not None:
+            try:
+                watchdog_timer.cancel()
+            except Exception:
+                pass
+        set_state("idle")
         recorder.stop()
         try:
             os.remove(PID_FILE)
@@ -1597,24 +1653,77 @@ def status_cmd(follow=False, fmt="text", extended=False):
     import time as _time
     last_emitted_state = None
 
-    while True:
-        pid = daemon_pid()
-        alive = daemon_alive(pid)
-        state = read_state() if alive else "stopped"
+    try:
+        while True:
+            pid = daemon_pid()
+            alive = daemon_alive(pid)
+            state = read_state() if alive else "stopped"
 
-        if fmt == "json":
-            data = format_status_json(state, alive=alive, pid=pid)
-            if not follow or state != last_emitted_state:
-                print(json.dumps(data, separators=(',', ':')), flush=True)
-                last_emitted_state = state
-        else:
-            if not follow or state != last_emitted_state:
-                print(state, flush=True)
-                last_emitted_state = state
+            if fmt == "json":
+                data = format_status_json(state, alive=alive, pid=pid)
+                if not follow or state != last_emitted_state:
+                    print(json.dumps(data, separators=(',', ':')), flush=True)
+                    last_emitted_state = state
+            else:
+                if not follow or state != last_emitted_state:
+                    print(state, flush=True)
+                    last_emitted_state = state
 
-        if not follow:
-            return 0
-        _time.sleep(0.15)
+            if not follow:
+                return 0
+            _time.sleep(0.15)
+    except (BrokenPipeError, KeyboardInterrupt):
+        return 0
+
+
+def configure_cmd():
+    """Muestra el estado y permite editar interactivamente la configuración de TheIA Dictate."""
+    config = load_config()
+    cfg_path = CONFIG_FILE
+
+    print("════════════════════════════════════════════════════════════")
+    print(" 🎙️  THEIA DICTATE — CONFIGURACIÓN DEL SISTEMA")
+    print("════════════════════════════════════════════════════════════")
+    print(f"• Archivo de configuración: {cfg_path}")
+    print(f"• Proveedor STT: {config.get('stt_provider', 'gemini')} (modelo: {config.get('stt_gemini_model', 'gemini-3.8-flash')})")
+    print(f"• Idioma: {config.get('language', 'es')}")
+    print(f"• Auto-stop: {config.get('auto_stop', 'vad')} (Silero VAD: {config.get('vad_use_silero', True)})")
+    print(f"• Feedback auditivo: {config.get('audio_feedback', {}).get('enabled', True)}")
+    vocab = config.get("vocabulary", [])
+    print(f"• Vocabulario activo ({len(vocab)} términos):")
+    if vocab:
+        print(f"  {', '.join(vocab[:10])}{' ...' if len(vocab) > 10 else ''}")
+    print("────────────────────────────────────────────────────────────")
+    print("Opciones disponibles:")
+    print("  [1] Editar archivo de configuración ($EDITOR / nano)")
+    print("  [2] Ejecutar diagnóstico y auditoría (doctor)")
+    print("  [3] Reautenticar Google OAuth (auth / login)")
+    print("  [4] Probar dictado de prueba (5 segundos)")
+    print("  [5] Salir")
+    print("════════════════════════════════════════════════════════════")
+
+    if not sys.stdin.isatty():
+        return 0
+
+    try:
+        choice = input("\nSelecciona una opción [1-5] (default: 1): ").strip() or "1"
+    except (EOFError, KeyboardInterrupt):
+        print("")
+        return 0
+
+    if choice == "1":
+        editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "nano"
+        subprocess.run([editor, cfg_path])
+    elif choice == "2":
+        doctor_cmd()
+    elif choice == "3":
+        auth_cmd()
+    elif choice == "4":
+        print("\nIniciando prueba de dictado de 5 segundos...")
+        record_cmd("start")
+        time.sleep(5)
+        record_cmd("stop")
+    return 0
 
 
 def auth_cmd(port=8085, no_browser=False):
@@ -1847,7 +1956,7 @@ def audit_providers(config=None):
         gemini_key = os.getenv("GEMINI_API_KEY")
 
     report["providers"]["gemini"] = {
-        "model": config.get("stt_gemini_model", "gemini-3.7-flash"),
+        "model": config.get("stt_gemini_model", "gemini-3.8-flash"),
         "has_api_key": bool(gemini_key),
         "status": "OK" if gemini_key else "FAIL (GEMINI_API_KEY no configurada)",
     }
@@ -1974,6 +2083,8 @@ if __name__ == "__main__":
     p_doctor = sub.add_parser("doctor", help="Auditoría y diagnóstico de proveedores y credenciales")
     p_doctor.add_argument("--format", choices=["text", "json"], default="text")
 
+    p_config = sub.add_parser("configure", aliases=["config"], help="Configuración interactiva de TheIA Dictate")
+
     p_auth = sub.add_parser("auth", aliases=["login"], help="Reautenticación interactiva Google OAuth (one-click en navegador)")
     p_auth.add_argument("--port", type=int, default=8085, help="Puerto local loopback (default: 8085)")
     p_auth.add_argument("--no-browser", action="store_true", help="No abrir navegador automáticamente")
@@ -1999,6 +2110,8 @@ if __name__ == "__main__":
     if args.command == "doctor" or args.doctor:
         fmt = getattr(args, "format", "text") if args.command == "doctor" else "text"
         sys.exit(doctor_cmd(fmt=fmt))
+    if args.command in ("configure", "config"):
+        sys.exit(configure_cmd())
     if args.daemon:
         run_daemon()
         sys.exit(0)

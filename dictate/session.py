@@ -52,7 +52,7 @@ class NotesSessionManager:
         self.state = SessionState()
         self.session_dir: str | None = None
         self.capture_session: PipeWireCaptureSession | None = None
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
 
     def get_devices_info(self) -> dict[str, str]:
         """Obtiene el resumen de dispositivos predeterminados de PipeWire."""
@@ -281,7 +281,7 @@ class NotesSessionManager:
             f"TRANSCRIPCIÓN COMPLETA DE LA LLAMADA:\n{raw_text}"
         )
 
-        res = call_gemini_structured(prompt, schema, model="gemini-3.7-flash", temperature=0.1, timeout=60)
+        res = call_gemini_structured(prompt, schema, model="gemini-3.8-flash", temperature=0.1, timeout=60)
         return res or {}
 
     def save_note_to_vault(self, note: StructuredNote | None = None, capture_fn: Any = None) -> dict[str, Any]:
